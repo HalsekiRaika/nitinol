@@ -22,8 +22,8 @@ use crate::process::{Process, ProcessContext, ProcessProxy};
 
 /// Resolved parameters every spawn needs to wire into the lifecycle loop.
 ///
-/// Collapses the pre-spec 11-arg `lifecycle_loop` signature (`P8`) into a
-/// single named struct so adding a new resource axis touches one place.
+/// One named struct instead of a long `lifecycle_loop` argument list, so
+/// adding a resource axis touches one place.
 pub(crate) struct LifecycleConfig<P: Process, D: Driver<P>> {
     pub(crate) process: P,
     pub(crate) process_name: Option<ProcessName>,

@@ -16,7 +16,7 @@ use crate::wedged_store::WedgedStore;
 
 /// Who the ledgers under test are opened for.
 ///
-/// A domain fact, deliberately unrelated to any stream key below.
+/// A domain fact unrelated to any stream key below.
 const HOLDER: &str = "acct-under-test";
 
 /// Put an interpreter through every law of the contract.

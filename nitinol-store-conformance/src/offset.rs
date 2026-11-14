@@ -1,8 +1,8 @@
 //! The contract every `OffsetStore` owes, made executable for any backend.
 //!
 //! [`OffsetStore`] states it as clauses `OFS-1` … `OFS-6`; this module is
-//! the ones a suite can fix as something to run. Two of them it deliberately
-//! does not fix — `OFS-4`, where the contract leaves two answers open, and
+//! the ones a suite can fix as something to run. Two of them it does not fix
+//! — `OFS-4`, where the contract leaves two answers open, and
 //! `OFS-6`, which is about a transaction a kit cannot make — and
 //! [`OffsetStore`] says so next to each.
 //!

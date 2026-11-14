@@ -226,7 +226,7 @@ mod tests {
 
     use super::*;
 
-    /// A deadline message whose codec is deliberately not a serde format, so
+    /// A deadline message whose codec is not a serde format, so
     /// "written through the codec the type named" is distinguishable from
     /// "written through the framework's own format".
     #[derive(Clone, Debug, PartialEq)]

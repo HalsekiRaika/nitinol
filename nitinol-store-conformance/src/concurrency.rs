@@ -21,8 +21,7 @@ const APPENDS_PER_WRITER: usize = 8;
 /// Put a store under concurrent writers and a reader following the global
 /// order, and check what that reader ends up having seen.
 ///
-/// This is the stress half of the kit, and it is deliberately a separate entry
-/// point from [`verify_deterministic`](crate::verify_deterministic): a pass
+/// This is the stress half of the kit, and a separate entry point from [`verify_deterministic`](crate::verify_deterministic): a pass
 /// here says a run of this shape found nothing, which is a weaker thing than
 /// the constructed evidence the deterministic clauses give, and the two must
 /// not be mistaken for one another.

@@ -5,8 +5,8 @@ use crate::error::ConfigError;
 /// Default mailbox capacity used when a `MailboxCapacity::Inherit` value is
 /// spawned outside any `ProcessSystem` (e.g. detached temp-ask processes).
 ///
-/// Kept at the pre-spec hardcoded value (32) so that detached spawn paths do
-/// not pick up surprise back-pressure from a process-system-level default.
+/// Fixed at 32 so that detached spawn paths do not pick up back-pressure from
+/// a process-system-level default.
 pub(crate) const DETACHED_MAILBOX_CAPACITY: usize = 32;
 
 /// Default pipe capacity for detached spawns. Same rationale as
