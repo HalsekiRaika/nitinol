@@ -1,6 +1,6 @@
 [package]
 name = "nitinol-saga"
-version = "0.6.0"
+version = "0.7.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -26,12 +26,12 @@ prost = "0.13"
 thiserror = "2"
 tokio = { version = "1", default-features = false, features = ["rt", "sync", "time"] }
 tracing = "0.1"
-nitinol-runtime = { path = "../nitinol-runtime", version = "0.6.0" }
-nitinol-persistence = { path = "../nitinol-persistence", version = "0.6.0" }
-nitinol-eventsource = { path = "../nitinol-eventsource", version = "0.6.0" }
+nitinol-runtime = { path = "../nitinol-runtime", version = "0.6.1" }
+nitinol-persistence = { path = "../nitinol-persistence", version = "0.6.1" }
+nitinol-eventsource = { path = "../nitinol-eventsource", version = "0.7.0" }
 # `#[derive(SagaSubscribe)]` is re-exported from here beside the trait it
 # implements, so one `use nitinol::saga::SagaSubscribe;` brings both into scope.
-nitinol-macros = { path = "../nitinol-macros", version = "0.6.0" }
+nitinol-macros = { path = "../nitinol-macros", version = "0.6.1" }
 
 # `protox` parses the `.proto` schema in pure Rust so codegen needs no system
 # `protoc`. Pinned to the 0.13-compatible line to share prost with the runtime

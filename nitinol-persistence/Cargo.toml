@@ -1,6 +1,6 @@
 [package]
 name = "nitinol-persistence"
-version = "0.6.0"
+version = "0.6.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -20,7 +20,7 @@ bench = false
 # The event identity a stored row carries is defined by the contract, as part
 # of what a domain promises the machinery; this crate re-exports it as the shape
 # of its rows and owns the machinery that collects and restores it.
-nitinol-contract = { path = "../nitinol-contract", version = "0.6.0" }
+nitinol-contract = { path = "../nitinol-contract", version = "0.6.1" }
 bytes = "1"
 jiff = "0.2"
 futures-core = "0.3"

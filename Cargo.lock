@@ -1842,7 +1842,7 @@ checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
 
 [[package]]
 name = "nitinol"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "bytes",
  "linkme",
@@ -1859,7 +1859,7 @@ dependencies = [
 
 [[package]]
 name = "nitinol-conformance"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1874,14 +1874,14 @@ dependencies = [
 
 [[package]]
 name = "nitinol-contract"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "bytes",
 ]
 
 [[package]]
 name = "nitinol-eventsource"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1903,7 +1903,7 @@ dependencies = [
 
 [[package]]
 name = "nitinol-macros"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "bytes",
  "nitinol",
@@ -1917,7 +1917,7 @@ dependencies = [
 
 [[package]]
 name = "nitinol-persistence"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1933,7 +1933,7 @@ dependencies = [
 
 [[package]]
 name = "nitinol-runtime"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -1944,7 +1944,7 @@ dependencies = [
 
 [[package]]
 name = "nitinol-saga"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1969,7 +1969,7 @@ dependencies = [
 
 [[package]]
 name = "nitinol-sqlx"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1992,7 +1992,7 @@ dependencies = [
 
 [[package]]
 name = "nitinol-store-conformance"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "bytes",

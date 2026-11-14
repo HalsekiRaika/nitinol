@@ -1,6 +1,6 @@
 [package]
 name = "nitinol-store-conformance"
-version = "0.6.0"
+version = "0.6.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -14,7 +14,7 @@ description = "Executable conformance suites for the contracts any nitinol Event
 # another, so whichever runtime you await the suite on stays the caller's choice
 # and `tokio` appears here as a dev-dependency only.
 [dependencies]
-nitinol-persistence = { path = "../nitinol-persistence", version = "0.6.0" }
+nitinol-persistence = { path = "../nitinol-persistence", version = "0.6.1" }
 bytes = "1"
 futures-core = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
