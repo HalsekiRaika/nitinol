@@ -134,18 +134,15 @@ cargo release push --execute --no-confirm
 
 ### When crates.io refuses a new crate
 
-crates.io accepts five *new* crates (names it has never seen) in a burst, then
-one more every ten minutes; beyond that it answers `429 Too Many Requests`.
-Crates that already exist on crates.io are not subject to this limit, so an
-ordinary release is unaffected. The `new-packages` limit in `release.toml` is
-cargo-release's own check and does not raise the server's limit.
+crates.io rate-limits *new* crates (names it has never seen): a handful in a
+burst, then one more every ten minutes, answered with `429 Too Many Requests`
+beyond that. Publishing a new version of an existing crate is not limited, so
+this only matters when the workspace gains a crate.
 
-If a release stops with `429` part-way, the release commit is already on
-`master` and some crates are already published. Do not run
-`cargo release --execute` again: it would bump the versions a second time and
-fail on the crates that are already uploaded. Publish the remaining crates one
-at a time, in the publish order above, waiting for the server's retry time
-between them:
+If a release stops with `429`, the release commit is already on `master` and
+the crates before it are already published. Do not run `cargo release --execute`
+again; publish the rest one at a time, in the order above, after the retry time
+the server names:
 
 ```sh
 cargo publish -p <crate>

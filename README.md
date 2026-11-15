@@ -13,20 +13,20 @@ No features are enabled by default. Add the crate with the features you need:
 
 ```toml
 [dependencies]
-nitinol = { version = "0.6", features = ["eventsource"] }
+nitinol = { version = "0.7", features = ["eventsource"] }
 ```
 
 ## Feature flags
 
 | Feature | Description |
 |---|---|
-| [`runtime`](https://docs.rs/nitinol-runtime/latest/nitinol-runtime/index.html) | The process runtime. |
-| [`persistence`](https://docs.rs/nitinol-persistence/latest/nitinol-persistence/index.html) | Persistence abstractions such as the event store and IDs. |
-| [`contract`](https://docs.rs/nitinol-contract/latest/nitinol-contract/index.html) | The runtime-free contract layer: the aggregate traits and `#[derive(Event)]`, without Tokio. |
-| [`eventsource`](https://docs.rs/nitinol-eventsource/latest/nitinol-eventsource/index.html) | The event sourcing layer: aggregates and projectors. |
-| [`saga`](https://docs.rs/nitinol-saga/latest/nitinol-saga/index.html) | The event-sourced process manager. |
-| [`full`](https://docs.rs/nitinol/latest/nitinol/) | All of the above. |
-| [`postgres`](https://docs.rs/nitinol-sqlx/latest/nitinol-sqlx/index.html) | The Postgres storage backend. Not part of `full`. |
+| [`runtime`](https://docs.rs/nitinol-runtime) | The process runtime. |
+| [`persistence`](https://docs.rs/nitinol-persistence) | Persistence abstractions such as the event store and IDs. |
+| [`contract`](https://docs.rs/nitinol-contract) | The runtime-free contract layer: the aggregate traits and `#[derive(Event)]`, without Tokio. |
+| [`eventsource`](https://docs.rs/nitinol-eventsource) | The event sourcing layer: aggregates and projectors. |
+| [`saga`](https://docs.rs/nitinol-saga) | The event-sourced process manager. |
+| [`full`](https://docs.rs/nitinol) | All of the above. |
+| [`postgres`](https://docs.rs/nitinol-sqlx) | The Postgres storage backend. Not part of `full`. |
 
 The API and the design are documented on [docs.rs](https://docs.rs/nitinol).
 

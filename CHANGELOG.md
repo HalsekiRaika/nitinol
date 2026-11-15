@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- (`nitinol`): The README's feature table now links to each member crate on
+  docs.rs, and the install snippet names `0.7`.
+
 ## [0.7.0] - 2026-11-14
 
 ### Added
