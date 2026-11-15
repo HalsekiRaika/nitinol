@@ -73,6 +73,20 @@ cargo install cargo-release
 
 Every `cargo release` command below is a dry run unless `--execute` is given.
 
+Two things about the command line, learned from the 0.7.0 release:
+
+- **Always name the packages.** The workspace's `default-members` leaves out
+  `providers/nitinol-sqlx`, so a `cargo release` with neither `-p` nor
+  `--workspace` does not see `nitinol-sqlx`, and the publish step stops before
+  publishing anything with
+  `nitinol x.y.z depends on unpublished workspace package nitinol-sqlx`. Pass
+  the ten publishable crates with `-p`, or `--workspace` (the examples are
+  `publish = false` and are skipped).
+- **Pass `--no-confirm` from a shell that captures output.** Every `--execute`
+  step asks `[y/N]` on a line without a newline. A shell that shows external
+  output line by line (Nushell, for one) never displays it, and the command
+  looks hung while it waits on stdin.
+
 A release starts by bringing `master` up to `dev` through a pull request, and
 ends by bringing the release commit back to `dev`:
 
@@ -103,6 +117,19 @@ Release the crates that changed together with the umbrella crate:
 
 ```sh
 cargo release <patch|minor> -p <crate> -p nitinol --execute
+```
+
+When the crates need different levels, run the steps one at a time so that one
+release commit carries every bump; `publish` and `push` take the full package
+list, as described above:
+
+```sh
+cargo release version minor -p <breaking crates> -p nitinol --execute --no-confirm
+cargo release version patch -p <the other changed crates> --execute --no-confirm
+cargo release replace --execute --no-confirm   # stamps CHANGELOG.md
+cargo release commit --execute --no-confirm
+cargo release publish --execute --no-confirm -p <all ten crates>
+cargo release push --execute --no-confirm
 ```
 
 ### When crates.io refuses a new crate
