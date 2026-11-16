@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- (`nitinol-eventsource`): `AggregateProxy::ask_with_retry`, which repeats an
+  `ask` under a `RetryPolicy` while it fails with a `Transient` error, deciding
+  the command again against the stream's current state each time.
+  `RetryPolicy` (attempt bound, initial backoff, multiplier; 3 / 100 ms / 2.0
+  by default) is public and reachable as `nitinol::eventsource::RetryPolicy`.
+
 ## [0.7.1] - 2026-11-15
 
 ### Fixed

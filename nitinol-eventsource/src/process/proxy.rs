@@ -5,10 +5,12 @@ use nitinol_persistence::error::AppendError;
 use nitinol_persistence::AggregateId;
 
 use crate::error::{
-    AskError, ExecError, MissingSnapshotSlot, PersistError, SnapshotSaveError, TellError,
+    AskError, ExecError, MissingSnapshotSlot, PersistError, Retryability, SnapshotSaveError,
+    TellError,
 };
 use crate::process::aggregate_process::{AskCmd, ExecMsg, SnapshotCmd, TellCmd};
 use crate::process::resolve::{AggregateResolver, Incarnation};
+use crate::retry_policy::RetryPolicy;
 
 /// A reference to an aggregate, addressed by identity rather than by activation.
 ///
@@ -169,6 +171,43 @@ impl<A: Aggregate> AggregateProxy<A> {
             self.invalidate(&incarnation);
         }
         outcome
+    }
+
+    /// [`ask`][Self::ask], made again under `policy` while it fails with a
+    /// [`Transient`](Retryability::Transient) error.
+    ///
+    /// `C: Clone` because each attempt sends the command again.
+    ///
+    /// # Errors
+    ///
+    /// - A [`Permanent`](Retryability::Permanent) error from
+    ///   [`ask`][Self::ask], as soon as an attempt returns it.
+    /// - The [`Transient`](Retryability::Transient) error the last attempt
+    ///   returned, once [`RetryPolicy::max_attempts`] attempts have failed.
+    pub async fn ask_with_retry<C>(
+        &self,
+        cmd: C,
+        policy: &RetryPolicy,
+    ) -> Result<<A as Decider<C>>::Output, AskError<<A as Decider<C>>::Rejection>>
+    where
+        A: Decider<C>,
+        C: Clone + Send + Sync + 'static,
+        <A as Decider<C>>::Output: Send + 'static,
+        <A as Decider<C>>::Rejection: std::error::Error + Send + Sync + 'static,
+    {
+        let mut attempt = 1;
+        loop {
+            match self.ask(cmd.clone()).await {
+                Err(e)
+                    if e.retryability() == Retryability::Transient
+                        && attempt < policy.max_attempts() =>
+                {
+                    attempt += 1;
+                    tokio::time::sleep(policy.backoff_before(attempt)).await;
+                }
+                outcome => return outcome,
+            }
+        }
     }
 
     /// Send a command without waiting for a response.

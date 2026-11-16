@@ -133,6 +133,7 @@ mod system_event;
 pub mod error;
 mod process;
 pub mod projection;
+mod retry_policy;
 pub mod system;
 
 // Defined in `nitinol-contract` so a runtime-free domain crate can implement
@@ -167,6 +168,7 @@ pub use self::process::{
     AggregateProps, AggregateProxy, AggregateTellTarget, RecoverOn, RecoverOnContingent,
 };
 pub use self::process::{SnapshotPersistor, SnapshotPersistorProxy};
+pub use self::retry_policy::RetryPolicy;
 
 // The value an activation of a `Recover = Latest` aggregate carries. It appears
 // in the signatures of `RecoverOn` and `RecoverOnContingent`, so it is public

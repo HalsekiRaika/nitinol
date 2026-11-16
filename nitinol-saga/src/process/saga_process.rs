@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
+use nitinol_eventsource::RetryPolicy;
 use nitinol_persistence::store::Journal;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
@@ -14,7 +15,6 @@ use crate::journal::ActiveSchedule;
 use crate::process::instance::ScheduleDelivery;
 use crate::process::interpreter::{self, InterpretOutcome, InterpreterCtx};
 use crate::process::replay;
-use crate::retry_policy::RetryPolicy;
 use crate::saga::Saga;
 use crate::scheduler::{self, ScheduleEvent, SchedulerProxy, Timers};
 use crate::scheduler::{ScheduleToken, TimerName};

@@ -3,7 +3,7 @@
 use std::borrow::Borrow;
 
 use futures_core::future::BoxFuture;
-use nitinol_eventsource::{EventAppending, SystemEvent};
+use nitinol_eventsource::{EventAppending, RetryPolicy, SystemEvent};
 use nitinol_persistence::store::Journal;
 use nitinol_persistence::AppendingEvent;
 use nitinol_runtime::process::ProcessContext;
@@ -18,7 +18,6 @@ use crate::lifecycle;
 use crate::observability::report_system_event;
 use crate::process::instance::ScheduleDelivery;
 use crate::process::saga_process::{Lifecycle, SagaProcess};
-use crate::retry_policy::RetryPolicy;
 use crate::saga::Saga;
 use crate::scheduler::{self, ScheduleEvent, SchedulerProxy, Timers};
 use crate::scheduler::{ScheduleToken, TimerName, SCHEDULED_ARM};
@@ -337,10 +336,10 @@ async fn persist_batch<S: Saga>(
                 tracing::warn!(
                     error = %e,
                     attempt,
-                    max_attempts = ictx.retry_policy.max_attempts,
+                    max_attempts = ictx.retry_policy.max_attempts(),
                     "saga atomic persist batch failed; will retry if attempts remain"
                 );
-                if attempt >= ictx.retry_policy.max_attempts {
+                if attempt >= ictx.retry_policy.max_attempts() {
                     break false;
                 }
             }
@@ -349,7 +348,7 @@ async fn persist_batch<S: Saga>(
     if !succeeded {
         tracing::error!(
             saga_id = ictx.saga_id.as_str(),
-            max_attempts = ictx.retry_policy.max_attempts,
+            max_attempts = ictx.retry_policy.max_attempts(),
             "saga persist batch exhausted staged retries; the input it was decided \
              from stays unconsumed so a redelivery can decide it again"
         );
