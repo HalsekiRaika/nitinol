@@ -178,6 +178,13 @@ impl PostgresBackend {
         }
     }
 
+    /// A pool onto a schema of its own that nothing has migrated, for a clause
+    /// about what migrating it does.
+    pub async fn unmigrated_pool(&self) -> PgPool {
+        let schema = self.create_schema().await;
+        pool_on(&self.url, &schema, POOL_CONNECTIONS).await
+    }
+
     /// A schema no other store in this run writes to.
     ///
     /// `cargo test` runs test functions in parallel and the conformance suite

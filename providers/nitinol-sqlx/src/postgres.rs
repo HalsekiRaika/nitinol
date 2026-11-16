@@ -71,13 +71,17 @@ impl PostgresEventStore {
     /// offsets in are created here too, so a deployment running them has one
     /// migration step and not three that could be applied apart.
     ///
+    /// What it applied is recorded in `nitinol_migrations`.
+    ///
     /// # Errors
     ///
     /// Returns [`MigrateError`] if the database cannot be reached or a statement
     /// against it fails, if a migration fails to apply, or if the migrations
     /// already recorded there do not match the ones this crate carries.
     pub async fn migrate(pool: &PgPool) -> Result<(), MigrateError> {
-        MIGRATOR.run(pool).await
+        let mut migrator = Migrator::with_migrations(MIGRATOR.iter().cloned().collect());
+        migrator.dangerous_set_table_name("nitinol_migrations");
+        migrator.run(pool).await
     }
 }
 

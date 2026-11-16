@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- (`nitinol-sqlx`): migrations are recorded in `nitinol_migrations` instead of
+  sqlx's default `_sqlx_migrations`, so an application can run its own
+  `sqlx::migrate!()` against the same database. A database migrated by an
+  earlier version needs its rows moved once:
+
+  ```sql
+  CREATE TABLE nitinol_migrations (LIKE _sqlx_migrations INCLUDING ALL);
+  INSERT INTO nitinol_migrations SELECT * FROM _sqlx_migrations WHERE version IN (1, 2, 3, 4);
+  DELETE FROM _sqlx_migrations WHERE version IN (1, 2, 3, 4);
+  ```
+
 ## [0.7.2] - 2026-11-16
 
 ### Added

@@ -13,6 +13,8 @@ mod journal_event_type_index;
 mod load_query;
 #[path = "integration/load_query_conjunction.rs"]
 mod load_query_conjunction;
+#[path = "integration/migration_table.rs"]
+mod migration_table;
 #[path = "integration/occ_contract.rs"]
 mod occ_contract;
 #[path = "integration/offset_conformance.rs"]
