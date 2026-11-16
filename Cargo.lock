@@ -1842,7 +1842,7 @@ checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
 
 [[package]]
 name = "nitinol"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "bytes",
  "linkme",
@@ -1881,7 +1881,7 @@ dependencies = [
 
 [[package]]
 name = "nitinol-eventsource"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1944,7 +1944,7 @@ dependencies = [
 
 [[package]]
 name = "nitinol-saga"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "async-trait",
  "bytes",
