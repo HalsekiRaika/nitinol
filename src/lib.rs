@@ -245,6 +245,7 @@ pub mod eventsource {
     pub use nitinol_macros::Event;
 
     pub use nitinol_eventsource::Query;
+    pub use nitinol_eventsource::RetryPolicy;
     pub use nitinol_eventsource::{AggregateProps, AggregateProxy, AggregateTellTarget};
     pub use nitinol_eventsource::{
         AskError, ExecError, MissingSnapshotSlot, Retryability, SnapshotSaveError, TellError,

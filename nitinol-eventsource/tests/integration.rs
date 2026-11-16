@@ -11,6 +11,8 @@ mod recording_journal;
 
 #[path = "integration/aggregate.rs"]
 mod aggregate;
+#[path = "integration/aggregate_ask_with_retry.rs"]
+mod aggregate_ask_with_retry;
 #[path = "integration/aggregate_conflict.rs"]
 mod aggregate_conflict;
 #[path = "integration/aggregate_decision.rs"]
@@ -95,6 +97,8 @@ mod proxy_error_conversion;
 mod query;
 #[path = "integration/replay.rs"]
 mod replay;
+#[path = "integration/retry_policy.rs"]
+mod retry_policy;
 #[path = "integration/snapshot_persistor.rs"]
 mod snapshot_persistor;
 #[path = "integration/snapshot_uses_the_codec_its_aggregate_names.rs"]

@@ -188,6 +188,16 @@ fn eventsource_facade_exposes_the_contingent_system() {
     use nitinol::eventsource::RecoverOnContingent;
 }
 
+/// The policy `AggregateProxy::ask_with_retry` takes is reached through the
+/// facade beside the proxy, so a caller writing against the umbrella can build
+/// one. Compile-time only, like the facade checks above.
+#[cfg(feature = "eventsource")]
+#[test]
+fn eventsource_facade_exposes_the_retry_policy() {
+    #[allow(unused_imports)]
+    use nitinol::eventsource::RetryPolicy;
+}
+
 // Feature: eventsource — error facade exposes only user-facing types
 
 /// Regression guard: `nitinol::eventsource::error` must expose exactly the

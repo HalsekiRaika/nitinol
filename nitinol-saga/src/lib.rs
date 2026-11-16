@@ -459,7 +459,6 @@ mod lifecycle;
 mod observability;
 mod persisted;
 mod process;
-mod retry_policy;
 mod saga;
 mod scheduler;
 mod subscribe;

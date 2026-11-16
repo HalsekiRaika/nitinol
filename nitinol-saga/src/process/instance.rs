@@ -5,6 +5,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use futures_core::future::BoxFuture;
 use nitinol_eventsource::system::ContingentSystem;
+use nitinol_eventsource::RetryPolicy;
 use nitinol_persistence::store::Journal;
 use nitinol_runtime::process::ProcessProxy;
 use nitinol_runtime::Props;
@@ -14,7 +15,6 @@ use crate::consumed::ConsumedPositions;
 use crate::id::SagaId;
 use crate::process::manager::{DeliverScheduled, SagaManagerProcess};
 use crate::process::saga_process::{FireScheduled, Lifecycle, SagaProcess};
-use crate::retry_policy::RetryPolicy;
 use crate::saga::Saga;
 use crate::scheduler::{DispatchFn, SchedulerProxy, TimerName};
 
