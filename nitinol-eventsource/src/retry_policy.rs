@@ -52,10 +52,8 @@ impl RetryPolicy {
     }
 
     /// How long to wait before the attempt numbered `next_attempt`, counting
-    /// from 1.
-    ///
-    /// The first attempt has no wait before it, so this is asked for
-    /// `next_attempt >= 2`.
+    /// from 1. There is no wait before attempt 1; values below 2 give
+    /// `initial_backoff`.
     pub fn backoff_before(&self, next_attempt: usize) -> Duration {
         // next_attempt = 2 → factor = multiplier^0 = 1.0
         // next_attempt = 3 → factor = multiplier^1
