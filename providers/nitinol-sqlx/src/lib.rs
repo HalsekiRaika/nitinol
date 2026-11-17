@@ -22,6 +22,10 @@
 //! # }
 //! ```
 //!
+//! `migrate` records what it applied in `nitinol_migrations` rather than
+//! sqlx's default `_sqlx_migrations`, so an application's own
+//! `sqlx::migrate!()` can run against the same database.
+//!
 //! Nothing is registered: the event types the store serves are the ones this
 //! binary linked. `#[derive(Event)]` writes that declaration for a domain type,
 //! and the framework writes it for the records it journals itself.

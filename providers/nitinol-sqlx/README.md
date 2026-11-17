@@ -12,9 +12,9 @@ clauses, each against a schema of its own.
 
 ```toml
 [dependencies]
-nitinol = { version = "0.4", features = ["postgres"] }
+nitinol = { version = "0.8", features = ["postgres"] }
 # or, without the umbrella:
-# nitinol-sqlx = "0.1"
+# nitinol-sqlx = "0.7"
 ```
 
 ```rust,ignore
@@ -70,6 +70,9 @@ the concurrency the pool allows.
 
 **Migrations are applied explicitly.** `PostgresEventStore::migrate` brings the
 database up to the schema the binary was built against. Nothing runs it for you.
+What it applied is recorded in `nitinol_migrations` rather than sqlx's default
+`_sqlx_migrations`, so your application's own `sqlx::migrate!()` can run against
+the same database.
 
 **Every event type is collected at link time, not registered by hand.** Each
 component of an `EventType` is a `&'static str`, so a path read out of a column
@@ -94,6 +97,18 @@ events it declares, reference something of it.
 journalled side by side in one table, keyed by nothing but the string you append
 under. Two of them sharing a key share a stream: their sequence numbers collide,
 and each refuses the other's appends.
+
+### Upgrading a database migrated before 0.7.0
+
+Earlier versions recorded their migrations in `_sqlx_migrations`. Left as it
+is, such a database has an empty `nitinol_migrations`, and `migrate` fails
+creating `nitinol_journal` again. Move the rows once before upgrading:
+
+```sql
+CREATE TABLE nitinol_migrations (LIKE _sqlx_migrations INCLUDING ALL);
+INSERT INTO nitinol_migrations SELECT * FROM _sqlx_migrations WHERE version IN (1, 2, 3, 4);
+DELETE FROM _sqlx_migrations WHERE version IN (1, 2, 3, 4);
+```
 
 ### TLS
 
