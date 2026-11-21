@@ -9,7 +9,7 @@ use nitinol_persistence::provider::ProjectionOffsetSlot;
 use nitinol_persistence::store::{DeliveryMode, OffsetScope, OffsetStore};
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::process::ProcessProxy;
-use nitinol_runtime::{Props, SupervisionStrategy};
+use nitinol_runtime::{IdleTimeout, Props, SupervisionStrategy};
 
 use crate::durable_stream::{
     DurableSubscription, SequenceCursor, DEFAULT_BATCH_LIMIT, DEFAULT_POLL_INTERVAL,
@@ -50,7 +50,8 @@ pub struct OriginSet(pub(crate) CatchupOrigin);
 /// The projector these props start settles what each read of the journal
 /// returned as one batch — one offset save, and under `ExactlyOnce` with a
 /// [`TxProvider`] one transaction — of at most
-/// [`with_batch_limit`][Self::with_batch_limit] records.
+/// [`with_batch_limit`][Self::with_batch_limit] records. It does not take the
+/// system default idle timeout: a quiet journal does not stop it.
 pub struct ProjectorProps<P, Tx = (), E = EventUnset, O = OriginUnset, H = Unhosted> {
     projection_id: ProjectionId,
     delivery_mode: DeliveryMode,
@@ -317,7 +318,11 @@ where
         // waiting.  `Restart` is no better here: it rebuilds the projector from
         // `producer()`, discarding the state a stateful projector accumulated
         // and the offset it was restored with.
-        .with_supervision_strategy(SupervisionStrategy::Resume);
+        .with_supervision_strategy(SupervisionStrategy::Resume)
+        // A quiet journal is a projector with nothing to apply, not one to
+        // stop: its poller hands it nothing on an empty read, and once stopped
+        // nothing would revive it until projectors get an activator (#227).
+        .with_idle_timeout(IdleTimeout::Persistent);
 
         system.process_system().spawn(runtime_props).await
     }

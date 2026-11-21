@@ -88,6 +88,15 @@
 //! 4. `eventsource-snapshot` – snapshot-accelerated replay
 //! 5. `eventsource-aggregate-communication` – inter-aggregate messaging, as a saga
 //!
+//! # Passivation
+//!
+//! An activation that receives nothing for its idle timeout stops, and its
+//! [`AggregateProxy`] replays the stream into a fresh one on a later `ask`; the
+//! first dispatch to reach the stopped activation may answer a transient
+//! [`AskError::Send`], which [`AggregateProxy::ask_with_retry`] absorbs.
+//! [`AggregateProps::with_idle_timeout`] sets that timeout per process,
+//! overriding the system default.
+//!
 //! # Observing lost races
 //!
 //! An activation numbers its appends from the sequence it replayed to, and the
@@ -169,6 +178,9 @@ pub use self::process::{
 };
 pub use self::process::{SnapshotPersistor, SnapshotPersistorProxy};
 pub use self::retry_policy::RetryPolicy;
+// The runtime's type, named by `AggregateProps::with_idle_timeout`; re-exported
+// so that call is writable without a direct dependency on `nitinol-runtime`.
+pub use nitinol_runtime::IdleTimeout;
 
 // The value an activation of a `Recover = Latest` aggregate carries. It appears
 // in the signatures of `RecoverOn` and `RecoverOnContingent`, so it is public

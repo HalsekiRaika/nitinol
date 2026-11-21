@@ -1,10 +1,10 @@
 use std::marker::PhantomData;
-use std::sync::Arc;
 
 use nitinol_contract::Aggregate;
 use nitinol_persistence::provider::Store;
 use nitinol_persistence::store::Journal;
 use nitinol_persistence::AggregateId;
+use nitinol_runtime::IdleTimeout;
 
 use crate::error::MissingSnapshotSlot;
 use crate::process::aggregate_process::AggregateProcess;
@@ -13,19 +13,20 @@ use crate::process::recover::{RecoverOn, SnapshotRecovery};
 use crate::process::resolve::{Activation, AggregateResolver, ResolveHandle};
 use crate::system::{EventSourceSystem, Hosted, Unhosted};
 
-/// Which aggregate to start, and nothing else.
+/// Which aggregate to start, and how long its activation may sit idle.
 ///
 /// There is no store, no provider and no persistor here: the system a spawn
-/// names is where all of them come from. What the props carry is the identity,
-/// and `H` is whether that system has been named yet — [`Unhosted`] props take
-/// one at [`spawn`][AggregateProps::spawn], and props obtained from
-/// [`EventSourceSystem::aggregate_props`] are [`Hosted`] and spawn with nothing
-/// re-injected.
+/// names is where all of them come from. What the props carry is the identity
+/// and the idle timeout, and `H` is whether that system has been named yet —
+/// [`Unhosted`] props take one at [`spawn`][AggregateProps::spawn], and props
+/// obtained from [`EventSourceSystem::aggregate_props`] are [`Hosted`] and
+/// spawn with nothing re-injected.
 ///
 /// Both forms meet on one private path, so the activation they reach, the
 /// registry that resolves it and the journal it writes to are the same.
 pub struct AggregateProps<A: Aggregate, H = Unhosted> {
     aggregate_id: AggregateId,
+    idle_timeout: IdleTimeout,
     host: H,
     /// `A` is named by the type alone — every ingredient an activation needs is
     /// taken from the system at the spawn — so it is carried as a marker.
@@ -40,6 +41,7 @@ impl<A: Aggregate> AggregateProps<A, Unhosted> {
     pub fn new(aggregate_id: AggregateId) -> Self {
         Self {
             aggregate_id,
+            idle_timeout: IdleTimeout::Inherit,
             host: Unhosted,
             _aggregate: PhantomData,
         }
@@ -112,7 +114,7 @@ impl<A: Aggregate> AggregateProps<A, Unhosted> {
     {
         // "Resolve *and activate*" — the caller is promised a running
         // aggregate, whether or not this call is what started it.
-        let reference = reference_on::<A, St>(self.aggregate_id, system);
+        let reference = reference_on::<A, St>(self.aggregate_id, self.idle_timeout, system);
         reference.activate().await;
         reference
     }
@@ -121,9 +123,24 @@ impl<A: Aggregate> AggregateProps<A, Unhosted> {
     pub(crate) fn hosted<St>(self, host: EventSourceSystem<St>) -> AggregateProps<A, Hosted<St>> {
         AggregateProps {
             aggregate_id: self.aggregate_id,
+            idle_timeout: self.idle_timeout,
             host: Hosted::new(host),
             _aggregate: PhantomData,
         }
+    }
+}
+
+impl<A: Aggregate, H> AggregateProps<A, H> {
+    /// Run every activation these props start under `timeout`, overriding the
+    /// system default set by
+    /// [`ProcessSystemBuilder::with_default_idle_timeout`](nitinol_runtime::ProcessSystemBuilder::with_default_idle_timeout).
+    ///
+    /// The resolve that activates a stream first decides the timeout: props
+    /// naming another one join that running activation rather than start a
+    /// second.
+    pub fn with_idle_timeout(mut self, timeout: IdleTimeout) -> Self {
+        self.idle_timeout = timeout;
+        self
     }
 }
 
@@ -155,7 +172,7 @@ where
     /// target it has not yet activated — still gets a reference addressing the
     /// same aggregate every other entry point does.
     pub(crate) fn into_reference(self) -> AggregateProxy<A> {
-        reference_on::<A, St>(self.aggregate_id, self.host.system())
+        reference_on::<A, St>(self.aggregate_id, self.idle_timeout, self.host.system())
     }
 }
 
@@ -166,6 +183,7 @@ where
 /// stores, different registries or different persistors.
 fn reference_on<A, St>(
     aggregate_id: AggregateId,
+    idle_timeout: IdleTimeout,
     system: &EventSourceSystem<St>,
 ) -> AggregateProxy<A>
 where
@@ -178,12 +196,13 @@ where
         system.resolve_handle(),
         system.persistence().event_store(),
         Ok(<A::Recover as RecoverOn<A, St>>::recovery(system)),
+        idle_timeout,
     )
 }
 
 /// A reference that resolves `aggregate_id` through `handle`, building each
-/// activation over `store` with `recovery` — or answering why none can be
-/// built.
+/// activation over `store` with `recovery` and running it under
+/// `idle_timeout` — or answering why none can be built.
 ///
 /// The typed system and the contingent view of it both end here, so a
 /// reference taken from either resolves through one registry and builds one
@@ -193,19 +212,23 @@ pub(crate) fn resolving_reference<A: Aggregate>(
     handle: ResolveHandle,
     store: Journal,
     recovery: Result<Option<SnapshotRecovery<A>>, MissingSnapshotSlot>,
+    idle_timeout: IdleTimeout,
 ) -> AggregateProxy<A> {
     // The handle carries the system a later re-resolve spawns on, so the
     // activation this reference may start and the one that replaces it are
     // identical.
     let identity = aggregate_id.clone();
-    let activation = recovery.map(|recovery| -> Activation<A> {
-        Arc::new(move || AggregateProcess {
-            state: A::default(),
-            aggregate_id: identity.clone(),
-            store: store.clone(),
-            sequence: 0,
-            recovery: recovery.clone(),
-        })
+    let activation = recovery.map(|recovery| {
+        Activation::new(
+            move || AggregateProcess {
+                state: A::default(),
+                aggregate_id: identity.clone(),
+                store: store.clone(),
+                sequence: 0,
+                recovery: recovery.clone(),
+            },
+            idle_timeout,
+        )
     });
 
     let resolver = AggregateResolver::new(handle, aggregate_id.clone(), activation);

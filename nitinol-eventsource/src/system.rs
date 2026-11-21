@@ -344,7 +344,7 @@ impl<St: Store> EventSourceSystem<St> {
 
     /// Return an [`AggregateProps`] carrying this system as where it starts.
     ///
-    /// Nothing is handed over here and nothing is left to configure: the
+    /// Nothing is handed over here and nothing is left to wire: the
     /// journal, the registry and — for an aggregate that recovers from one —
     /// the snapshot persistor are all taken from this system at the spawn. Its
     /// `spawn` takes no argument and resolves exactly as

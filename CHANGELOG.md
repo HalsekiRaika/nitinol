@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- (`nitinol-eventsource`): `AggregateProps::with_idle_timeout` sets an
+  `IdleTimeout` on the activation these props start, overriding the system
+  default; a passivated aggregate is replayed by the next `ask`. `IdleTimeout`
+  is re-exported from `nitinol-eventsource` and `nitinol::eventsource`.
+
+### Fixed
+
+- (`nitinol-eventsource`): a projector no longer stops under the system default
+  idle timeout. Its poller hands it nothing on an empty read, so a quiet journal
+  looked like idleness and the projector died with nothing to revive it.
+  Projectors are persistent until #227 gives them an activator.
+
 ## [0.8.0] - 2026-11-17
 
 ### Changed

@@ -19,6 +19,8 @@ mod aggregate_conflict;
 mod aggregate_decision;
 #[path = "integration/aggregate_error_retryability.rs"]
 mod aggregate_error_retryability;
+#[path = "integration/aggregate_idle_timeout.rs"]
+mod aggregate_idle_timeout;
 #[path = "integration/aggregate_process.rs"]
 mod aggregate_process;
 #[path = "integration/aggregate_props_holds_event_store.rs"]
