@@ -461,10 +461,7 @@ fn projector_catchup(c: &mut Criterion) {
                             applied_to(&applied, &reached, count).await;
                             measured += started.elapsed();
 
-                            projector
-                                .stop()
-                                .await
-                                .expect("a projector this iteration started must take a stop");
+                            projector.stop().await;
                         }
                         measured
                     }

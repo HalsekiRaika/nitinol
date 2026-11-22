@@ -15,7 +15,7 @@ pub use event_store::{EventStore, EventStoreClone, EventStream};
 pub use in_memory::{
     InMemoryEventStore, InMemoryOffsetStore, InMemorySnapshotStore, InMemoryStore,
 };
-pub use journal::Journal;
+pub use journal::{AppendObserver, Journal};
 pub use offset_scope::OffsetScope;
 pub use offset_store::{DeliveryMode, OffsetStore};
 pub use snapshot_store::{SnapshotStore, SnapshotStoreClone};

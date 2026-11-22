@@ -13,13 +13,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `IdleTimeout` on the activation these props start, overriding the system
   default; a passivated aggregate is replayed by the next `ask`. `IdleTimeout`
   is re-exported from `nitinol-eventsource` and `nitinol::eventsource`.
+- (`nitinol-eventsource`): a projection activator, one per `EventSourceSystem`
+  and started by the first projector spawn, keeps every projection spawned on
+  the system and starts its projector again when an event it follows is
+  appended, so a projector may passivate. Appends through the system's own
+  journal wake it at once; appends by other writers are found by a watcher that
+  reads the journal every 10 s, set with
+  `EventSourceSystemBuilder::with_projection_watcher_interval` or turned off
+  with `EventSourceSystemBuilder::without_projection_watcher`.
+  `EventSourceSystem::event_store` is the system's journal, observed by the
+  activator.
+- (`nitinol-eventsource`): `ProjectorProps::with_idle_timeout` sets the idle
+  timeout a projector stops on; it defaults to the system default. A
+  passivated projector is rebuilt from its producer and catches up from its
+  offset.
+- (`nitinol-persistence`): `AppendObserver`, and `Journal::observed_by`, which
+  reports every append a journal accepts to an observer.
+
+### Changed
+
+- (`nitinol-eventsource`): `ProjectorProps::spawn` returns a `ProjectorHandle`
+  instead of the projector process's `ProcessProxy`; `is_active` reports
+  whether a projector runs and `stop` takes the projection out of the system
+  and waits for its projector to end. Spawning a projection id the system
+  already has joins it rather than starting a second projector.
+- (`nitinol-eventsource`): `ProjectorProcess` is no longer public.
 
 ### Fixed
 
-- (`nitinol-eventsource`): a projector no longer stops under the system default
-  idle timeout. Its poller hands it nothing on an empty read, so a quiet journal
-  looked like idleness and the projector died with nothing to revive it.
-  Projectors are persistent until #227 gives them an activator.
+- (`nitinol-eventsource`): a projector stopped by the system default idle
+  timeout is no longer lost. Its poller hands it nothing on an empty read, so a
+  quiet journal looked like idleness and the projector died with nothing to
+  revive it; the projection activator now starts it again when an event it
+  follows is appended.
+- (`nitinol-eventsource`): an `AtMostOnce` projection whose offset save fails no
+  longer runs the batch's handlers; the batch is redelivered, so a projector
+  that stops and starts again does not handle the same event twice.
 
 ## [0.8.0] - 2026-11-17
 

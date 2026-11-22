@@ -75,6 +75,8 @@ mod hosted_props_spawn;
 #[cfg(feature = "test-helpers")]
 #[path = "integration/mock_aggregate_proxy.rs"]
 mod mock_aggregate_proxy;
+#[path = "integration/projection_activator.rs"]
+mod projection_activator;
 #[path = "integration/projection_cursor_hold.rs"]
 mod projection_cursor_hold;
 #[path = "integration/projection_id.rs"]

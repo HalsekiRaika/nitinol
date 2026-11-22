@@ -59,7 +59,7 @@ use linkme::distributed_slice;
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{
-    Event, ProjectionContext, ProjectionId, Projector, ProjectorProps, TxProvider,
+    Event, ProjectionContext, ProjectionId, Projector, ProjectorHandle, ProjectorProps, TxProvider,
 };
 use nitinol_persistence::error::OffsetError;
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider, Unprovided};
@@ -67,7 +67,6 @@ use nitinol_persistence::store::{Journal, OffsetScope, OffsetStore};
 use nitinol_persistence::{
     AggregateId, EventRegistryEntry, EventType, Family, TypeName, EVENT_REGISTRY,
 };
-use nitinol_runtime::process::{Process, ProcessProxy};
 use nitinol_runtime::ProcessSystem;
 use nitinol_sqlx::{OffsetConflict, PostgresEventStore, PostgresOffsetStore};
 use sqlx::{PgPool, PgTransaction};
@@ -390,26 +389,16 @@ async fn until_counted(what: &str, counters: &[&AtomicUsize], expected: usize) {
         .unwrap_or_else(|_| panic!("timed out waiting until {what}"));
 }
 
-/// Stop `proxy` and wait for the runtime to let go of it.
+/// Stop `projector` and wait until it has ended.
 ///
 /// A clause that read the read model while a projector it thought it had
 /// stopped was still applying events would be reading a value on its way
-/// somewhere, so what it waits for is the process leaving the registry rather
-/// than the stop having been sent.
-async fn stopped<P: Process>(system: &ProcessSystem, proxy: &ProcessProxy<P>) {
-    proxy
-        .stop()
+/// somewhere, so what it waits for is the projector having ended rather than
+/// the stop having been sent.
+async fn stopped(projector: &ProjectorHandle) {
+    tokio::time::timeout(SETTLE_DEADLINE, projector.stop())
         .await
-        .expect("a running projector must take a stop");
-    let pid = proxy.pid();
-    let gone = async {
-        while system.lookup(pid).await.is_some() {
-            tokio::time::sleep(SETTLE_POLL).await;
-        }
-    };
-    tokio::time::timeout(SETTLE_DEADLINE, gone)
-        .await
-        .expect("a projector that was told to stop must leave the runtime's registry");
+        .expect("a projector that was told to stop must end");
 }
 
 /// Acceptance: "an incremental read model under redelivery".
@@ -467,7 +456,7 @@ async fn an_event_a_restarted_projector_is_handed_again_is_applied_once() {
         Some(1),
     )
     .await;
-    stopped(first_system.process_system(), &first).await;
+    stopped(&first).await;
 
     // When: a second projector takes the same projection over, and is handed
     // the event the first one already applied along with one it has not seen.
@@ -499,7 +488,7 @@ async fn an_event_a_restarted_projector_is_handed_again_is_applied_once() {
         Some(2),
     )
     .await;
-    stopped(second_system.process_system(), &second).await;
+    stopped(&second).await;
 
     assert_eq!(
         applied(&pool).await,
@@ -590,7 +579,7 @@ async fn a_project_that_fails_leaves_the_read_model_and_the_offset_where_they_we
         Some(1),
     )
     .await;
-    stopped(system.process_system(), &projector).await;
+    stopped(&projector).await;
 
     assert_eq!(
         applied(&pool).await,
@@ -656,7 +645,7 @@ async fn a_refused_offset_save_rolls_the_read_model_update_back() {
         1,
     )
     .await;
-    stopped(system.process_system(), &projector).await;
+    stopped(&projector).await;
 
     assert_eq!(
         applied(&pool).await,
@@ -764,8 +753,8 @@ async fn two_projectors_holding_one_offset_apply_the_event_once() {
     )
     .await;
 
-    stopped(one_system.process_system(), &one).await;
-    stopped(other_system.process_system(), &other).await;
+    stopped(&one).await;
+    stopped(&other).await;
 
     assert_eq!(
         applied(&one_pool).await,
@@ -876,8 +865,8 @@ async fn two_projectors_starting_a_projection_together_apply_the_event_once() {
     )
     .await;
 
-    stopped(one_system.process_system(), &one).await;
-    stopped(other_system.process_system(), &other).await;
+    stopped(&one).await;
+    stopped(&other).await;
 
     assert_eq!(
         applied(&one_pool).await,

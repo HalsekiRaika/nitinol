@@ -228,7 +228,8 @@ where
 
 /// The batch's end is saved before any handler runs, and a handler that fails
 /// is left behind: every record of the batch is spent either way — that is the
-/// guarantee the mode names.
+/// guarantee the mode names. A batch whose offset could not be saved settles
+/// nothing and is redelivered, since no handler has run for it yet.
 async fn apply_at_most_once<'pid, Cs, P, I, F>(
     store: &Cs,
     projection: ProjectionIdentity<'pid>,
@@ -249,8 +250,10 @@ where
         tracing::error!(
             error = %e,
             last_observed,
-            "offset save failed before project (at-most-once)",
+            "offset save failed before project (at-most-once); \
+             batch will be redelivered",
         );
+        return BatchOutcome::Unsettled;
     }
 
     for record in batch.records {
@@ -618,7 +621,8 @@ mod tests {
     }
 
     // AtMostOnce: the batch's end is spent before the handlers run, so every
-    // outcome settles the whole batch.
+    // outcome settles the whole batch — unless the offset could not be saved,
+    // in which case no handler has run and the batch is redelivered.
 
     #[tokio::test]
     async fn at_most_once_settles_on_success() {
@@ -650,6 +654,28 @@ mod tests {
             Some(SEQUENCE),
             "AtMostOnce must have saved the offset before the (failed) project"
         );
+    }
+
+    #[tokio::test]
+    async fn at_most_once_runs_no_handler_and_retries_when_the_offset_save_fails() {
+        let case = Case::refusing_saves("amo-save-fail");
+        let batch = Batch {
+            records: vec![to_project(1, true), to_project(2, true)],
+            last_observed: 2,
+        };
+
+        let (outcome, called_for) = case.apply(DeliveryMode::AtMostOnce, None, batch).await;
+
+        assert_eq!(
+            outcome,
+            BatchOutcome::Unsettled,
+            "a batch whose offset did not land is redelivered, not spent"
+        );
+        assert!(
+            called_for.is_empty(),
+            "no handler may run before the offset is saved, got {called_for:?}"
+        );
+        assert_eq!(case.stored().await, None);
     }
 
     #[tokio::test]

@@ -210,7 +210,7 @@ where
         self,
         system: &EventSourceSystem<St>,
     ) -> SagaHostProxy<S> {
-        let store = system.persistence().event_store();
+        let store = system.event_store();
         let offsets = system.persistence().saga_offsets();
         let host = system.to_contingent();
         let ps = system.process_system();

@@ -24,7 +24,11 @@
 // | exactly_once_without_tx_project_failure_blocks_next_event    | C-EO-NOTX-DEF     |
 // | projector_keeps_retrying_a_permanently_failing_event         | C-SUPERVISION     |
 // | unregistered_event_type_does_not_block_the_next_event        | C-SKIP-KEEP       |
-// | already_processed_event_is_accepted_without_projecting        | C-SKIP-KEEP       |
+//
+// The other half of C-SKIP-KEEP — a redelivered record the offset already
+// covers is settled without being projected — is handed to the projector
+// directly, which only the crate can do, so it is a unit test in
+// `projection/process.rs`.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -36,15 +40,14 @@ use bytes::Bytes;
 
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{
-    codec::Codec, Event, PolledBatch, ProjectionContext, ProjectionId, Projector, ProjectorProps,
-    SettledThrough, TxProvider,
+    codec::Codec, Event, ProjectionContext, ProjectionId, Projector, ProjectorProps, TxProvider,
 };
 use nitinol_persistence::error::OffsetError;
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{
     DeliveryMode, EventStore, InMemoryEventStore, InMemoryOffsetStore, OffsetScope, OffsetStore,
 };
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, LoadedEvent, TypeName};
+use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 
 // Timing
@@ -91,21 +94,6 @@ async fn wait_for_offset<Cs: OffsetStore>(
     let deadline = Instant::now() + WAIT_TIMEOUT;
     loop {
         if offset_of(store, id).await == expected {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        tokio::time::sleep(POLL_STEP).await;
-    }
-}
-
-/// Wait until a stopped process has left the registry, so a second projector
-/// over the same stores cannot race the first one.
-async fn wait_for_deregister(system: &ProcessSystem, pid: nitinol_runtime::ident::Pid) -> bool {
-    let deadline = Instant::now() + WAIT_TIMEOUT;
-    loop {
-        if system.lookup(pid).await.is_none() {
             return true;
         }
         if Instant::now() >= deadline {
@@ -632,11 +620,10 @@ async fn at_least_once_failed_event_survives_a_restart() {
         "seq=1 must keep being redelivered while it fails; observed {before_restart:?}"
     );
 
-    let first_pid = first_run.pid();
-    let _ = first_run.stop().await;
+    first_run.stop().await;
     assert!(
-        wait_for_deregister(system.process_system(), first_pid).await,
-        "the first projector must deregister before the second one starts"
+        !first_run.is_active().await,
+        "the first projector must have stopped before the second one starts"
     );
 
     // Second run: the same stores, with the failure budget spent.
@@ -1076,7 +1063,7 @@ async fn projector_keeps_retrying_a_permanently_failing_event() {
 
     let recorder_c = Arc::clone(&recorder);
     let failures_c = Arc::clone(&failures);
-    let proxy = ProjectorProps::new(projection_id.clone(), move || RecordingProjector {
+    let handle = ProjectorProps::new(projection_id.clone(), move || RecordingProjector {
         recorder: Arc::clone(&recorder_c),
         fail_sequence: Some(1),
         remaining_failures: Arc::clone(&failures_c),
@@ -1089,7 +1076,7 @@ async fn projector_keeps_retrying_a_permanently_failing_event() {
 
     let retried = wait_for(|| recorder.len() >= 3).await;
     let attempts = recorder.len();
-    let alive = system.process_system().lookup(proxy.pid()).await.is_some();
+    let alive = handle.is_active().await;
 
     assert!(
         alive,
@@ -1148,75 +1135,5 @@ async fn unregistered_event_type_does_not_block_the_next_event() {
     assert!(
         reached,
         "the offset must reach 2 past the skipped event; observed {observed:?}"
-    );
-}
-
-/// An event at or below the projector's offset was applied by an earlier
-/// incarnation. Accepting it without projecting it is what lets the cursor
-/// move past a redelivery; reporting it as a failure would stall the stream.
-#[tokio::test(flavor = "multi_thread")]
-async fn already_processed_event_is_accepted_without_projecting() {
-    let event_store = InMemoryEventStore::default();
-    let offset_store = InMemoryOffsetStore::default();
-    let system = EventSourceSystem::builder(ProcessSystem::new().await)
-        .with_persistence(PersistenceProvider::new(
-            CustomStore::builder()
-                .eventstore(event_store.clone())
-                .projection_offsets(offset_store.clone())
-                .build(),
-        ))
-        .build();
-    let agg_id = AggregateId::new("duplicate-agg");
-    let projection_id = ProjectionId::new("duplicate");
-
-    offset_store
-        .save(&OffsetScope::from(&projection_id), 5, None)
-        .await
-        .expect("seeding the offset must succeed");
-
-    let recorder = Recorder::new();
-
-    let recorder_c = Arc::clone(&recorder);
-    let proxy = ProjectorProps::new(projection_id.clone(), move || RecordingProjector {
-        recorder: Arc::clone(&recorder_c),
-        fail_sequence: None,
-        remaining_failures: budget(0),
-    })
-    .with_event::<Evt>()
-    .delivery_mode(DeliveryMode::AtLeastOnce)
-    .catchup_from_aggregate(agg_id.clone())
-    .spawn(&system)
-    .await;
-
-    let already_processed = LoadedEvent {
-        stream_key: agg_id.as_str().to_owned(),
-        sequence: 3,
-        global_sequence: 3,
-        event_type: Evt::EVENT_TYPE,
-        payload: Bytes::new(),
-        occurred_at: jiff::Timestamp::now(),
-    };
-
-    let accepted = proxy
-        .ask(PolledBatch {
-            records: vec![(3, already_processed)],
-            last_observed: 3,
-        })
-        .await;
-
-    match accepted {
-        Ok(SettledThrough(through)) => assert_eq!(
-            through, 3,
-            "an event at or below the offset must be settled so the cursor can move past it"
-        ),
-        Err(e) => panic!(
-            "an event at or below the offset must be accepted so the cursor can move past it, \
-             got {e:?}"
-        ),
-    }
-    assert_eq!(
-        recorder.sequences(),
-        Vec::<u64>::new(),
-        "an already-processed event must not be projected again"
     );
 }

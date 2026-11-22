@@ -194,7 +194,7 @@ where
     resolving_reference(
         aggregate_id,
         system.resolve_handle(),
-        system.persistence().event_store(),
+        system.event_store(),
         Ok(<A::Recover as RecoverOn<A, St>>::recovery(system)),
         idle_timeout,
     )

@@ -23,6 +23,8 @@ mod event_store_occ;
 mod event_store_prefix_search;
 #[path = "integration/event_store_str_key.rs"]
 mod event_store_str_key;
+#[path = "integration/journal_append_observer.rs"]
+mod journal_append_observer;
 #[path = "integration/journal_clone_shares_backend_state.rs"]
 mod journal_clone_shares_backend_state;
 #[path = "integration/journal_names_no_slot_beyond_itself.rs"]

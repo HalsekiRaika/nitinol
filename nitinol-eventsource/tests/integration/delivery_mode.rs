@@ -446,21 +446,11 @@ async fn at_least_once_failed_event_is_reprocessed_after_restart() {
     // Stop the first projector and wait for it to fully deregister before
     // starting the second run; without this, both projectors can race on
     // the offset store.
-    let proxy_pid = proxy.pid();
-    let _ = proxy.stop().await;
-    {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            if system.process_system().lookup(proxy_pid).await.is_none() {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "timed out waiting for projector to fully stop"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-    }
+    proxy.stop().await;
+    assert!(
+        !proxy.is_active().await,
+        "the first projector must have fully stopped"
+    );
 
     // Verify: offset is at seq=1 (seq=2 was not saved due to failure)
     let offset_after_first_run = offset_store

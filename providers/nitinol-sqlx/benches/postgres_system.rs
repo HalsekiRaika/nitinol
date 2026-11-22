@@ -86,8 +86,8 @@ use linkme::distributed_slice;
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{
-    Aggregate, Event, Latest, Never, ProjectionContext, ProjectionId, Projector, Query,
-    Snapshotable, TxProvider,
+    Aggregate, Event, Latest, Never, ProjectionContext, ProjectionId, Projector, ProjectorHandle,
+    Query, Snapshotable, TxProvider,
 };
 use nitinol_persistence::provider::{
     PersistenceProvider, ProjectionOffsetSlot, SnapshotSlot, Store,
@@ -97,7 +97,6 @@ use nitinol_persistence::{
     AggregateId, AppendingEvent, EventRegistryEntry, EventType, Family, PersistedSnapshot,
     TypeName, EVENT_REGISTRY,
 };
-use nitinol_runtime::process::{Process, ProcessProxy};
 use nitinol_runtime::ProcessSystem;
 use nitinol_sqlx::PostgresStore;
 use postgres::BenchDatabase;
@@ -131,10 +130,8 @@ const ACTIVATION_MEASUREMENT: Duration = Duration::from_secs(1);
 /// not going to finish trips it rather than a slow one.
 const CATCHUP_DEADLINE: Duration = Duration::from_secs(120);
 
-/// How long a stopped projector has to leave the registry, and how often that
-/// is looked at.
+/// How long a stopped projector has to end.
 const STOP_DEADLINE: Duration = Duration::from_secs(30);
-const STOP_POLL: Duration = Duration::from_millis(25);
 
 /// Fixed rather than read off the clock, so two runs seed the same rows.
 const SEEDED_AT_MICROSECOND: i64 = 1_700_000_000_123_456;
@@ -453,26 +450,16 @@ async fn committed_past(committed: &AtomicU64, settled: &Notify, seen: u64) {
         });
 }
 
-/// Stop `proxy` and wait for the runtime to let go of it.
+/// Stop `projector` and wait until it has ended.
 ///
 /// The window has closed by the time this runs: the batch's offset save and
-/// commit returned inside it. Waiting for the process to leave the registry,
-/// rather than for the stop to have been sent, is what keeps this projector's
-/// poller off the pool during the next iteration's window.
-async fn stopped<P: Process>(system: &ProcessSystem, proxy: &ProcessProxy<P>) {
-    proxy
-        .stop()
+/// commit returned inside it. Waiting for the projector to have ended, rather
+/// than for the stop to have been sent, is what keeps this projector's poller
+/// off the pool during the next iteration's window.
+async fn stopped(projector: &ProjectorHandle) {
+    tokio::time::timeout(STOP_DEADLINE, projector.stop())
         .await
-        .expect("a projector this iteration started must take a stop");
-    let pid = proxy.pid();
-    let gone = async {
-        while system.lookup(pid).await.is_some() {
-            tokio::time::sleep(STOP_POLL).await;
-        }
-    };
-    tokio::time::timeout(STOP_DEADLINE, gone)
-        .await
-        .expect("a projector that was told to stop must leave the runtime's registry");
+        .expect("a projector that was told to stop must end");
 }
 
 /// What bringing one aggregate back out of Postgres costs, by replaying its
@@ -660,7 +647,7 @@ fn exactly_once(c: &mut Criterion, rt: &Runtime, pool: &PgPool) {
                                 "the commit that settled the catch-up must leave the offset at \
                                  the stream's length"
                             );
-                            stopped(system.process_system(), &projector).await;
+                            stopped(&projector).await;
                         }
                         measured
                     }

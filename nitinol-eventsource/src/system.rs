@@ -3,21 +3,26 @@
 mod contingent;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::projection::ProjectionId;
 use nitinol_contract::Aggregate;
 use nitinol_persistence::provider::{
     PersistenceProvider, ProjectionOffsetSlot, SnapshotSlot, Store,
 };
-use nitinol_persistence::store::Album;
+use nitinol_persistence::store::{Album, Journal};
 use nitinol_persistence::{AggregateId, LoadedEvent};
 use nitinol_runtime::ident::ProcessName;
+use nitinol_runtime::process::ProcessProxy;
 use nitinol_runtime::ProcessSystem;
 use tokio::sync::OnceCell;
 
 use crate::durable_stream::{CursorUnset, DurableStream};
 use crate::process::resolve::{AggregateRegistry, ResolveHandle};
 use crate::process::{RecoverOn, SnapshotPersistor, SnapshotPersistorProxy};
+use crate::projection::activator::{
+    AppendNotifier, ProjectionActivator, WatcherSetting, WatcherSource,
+};
 use crate::projection::ProjectorProps;
 use crate::{AggregateProps, AggregateProxy};
 
@@ -89,6 +94,7 @@ impl<St> Hosted<St> {
 pub struct EventSourceSystemBuilder<P = PersistenceUnset> {
     ps: ProcessSystem,
     persistence: P,
+    projection_watcher: WatcherSetting,
 }
 
 impl EventSourceSystemBuilder<PersistenceUnset> {
@@ -96,6 +102,7 @@ impl EventSourceSystemBuilder<PersistenceUnset> {
         Self {
             ps,
             persistence: PersistenceUnset,
+            projection_watcher: WatcherSetting::default(),
         }
     }
 
@@ -116,17 +123,45 @@ impl EventSourceSystemBuilder<PersistenceUnset> {
         EventSourceSystemBuilder {
             ps: self.ps,
             persistence,
+            projection_watcher: self.projection_watcher,
         }
     }
 }
 
 impl<St: Store> EventSourceSystemBuilder<PersistenceProvider<St>> {
+    /// Have the projection watcher read the journal every `interval`; it
+    /// defaults to 10 s.
+    ///
+    /// The watcher is how a passivated projector learns of an event appended
+    /// somewhere other than this system's own journal — by another process
+    /// sharing the store, say. What this system's aggregates, sagas and
+    /// [`event_store`][EventSourceSystem::event_store] append wakes a projector
+    /// at once, so the interval only bounds how late such a foreign write is
+    /// projected while its projector is passivated. The watcher runs once the
+    /// first projector is spawned, starting an interval later.
+    pub fn with_projection_watcher_interval(mut self, interval: Duration) -> Self {
+        self.projection_watcher = WatcherSetting::Every(interval);
+        self
+    }
+
+    /// Run no projection watcher.
+    ///
+    /// For a deployment where this system is the only writer to its store:
+    /// every append then goes through this system's journal and wakes a
+    /// projector at once, and nothing is left for a watcher to find. Where
+    /// another writer shares the store, its appends reach a passivated
+    /// projector only when something this system appends wakes it.
+    pub fn without_projection_watcher(mut self) -> Self {
+        self.projection_watcher = WatcherSetting::Disabled;
+        self
+    }
+
     /// Finalize construction and return the configured [`EventSourceSystem`].
     pub fn build(self) -> EventSourceSystem<St> {
         EventSourceSystem {
             inner: Arc::new(Inner {
                 persistence: self.persistence,
-                node: Node::new(self.ps),
+                node: Node::new(self.ps, self.projection_watcher),
             }),
         }
     }
@@ -192,17 +227,60 @@ struct NodeInner {
     /// contract is written for a single consumer serialising its calls: a second
     /// process over one store would be two.
     snapshot_persistor: OnceCell<SnapshotPersistorProxy>,
+    /// The one projection activator a system runs, started by the first
+    /// projector spawn.
+    ///
+    /// One per node, so that a projection id names one registration however
+    /// many clones of the system spawn it.
+    projection_activator: OnceCell<ProcessProxy<ProjectionActivator>>,
+    /// What every journal this node hands out reports its appends to, and what
+    /// hands them on to the activator once it runs.
+    append_notifier: Arc<AppendNotifier>,
+    projection_watcher: WatcherSetting,
 }
 
 impl Node {
-    fn new(ps: ProcessSystem) -> Self {
+    fn new(ps: ProcessSystem, projection_watcher: WatcherSetting) -> Self {
         Self {
             inner: Arc::new(NodeInner {
                 ps,
                 registry: AggregateRegistry::new(),
                 snapshot_persistor: OnceCell::new(),
+                projection_activator: OnceCell::new(),
+                append_notifier: Arc::new(AppendNotifier::default()),
+                projection_watcher,
             }),
         }
+    }
+
+    /// `journal`, reporting every append it accepts to this node's projection
+    /// activator.
+    fn observed(&self, journal: Journal) -> Journal {
+        journal.observed_by(Arc::clone(&self.inner.append_notifier) as _)
+    }
+
+    /// This node's projection activator, starting it on the first call.
+    ///
+    /// `watcher` builds the watcher's source from the asking system's store,
+    /// which is the same store every time for the reason
+    /// [`snapshot_persistor`][Self::snapshot_persistor] states; it is called
+    /// only when the activator starts and the node runs a watcher.
+    async fn projection_activator(
+        &self,
+        watcher: impl FnOnce(Duration) -> WatcherSource,
+    ) -> ProcessProxy<ProjectionActivator> {
+        self.inner
+            .projection_activator
+            .get_or_init(|| async {
+                let watcher = match self.inner.projection_watcher {
+                    WatcherSetting::Every(interval) => Some(watcher(interval)),
+                    WatcherSetting::Disabled => None,
+                };
+                ProjectionActivator::spawn(&self.inner.ps, &self.inner.append_notifier, watcher)
+                    .await
+            })
+            .await
+            .clone()
     }
 
     fn process_system(&self) -> &ProcessSystem {
@@ -312,6 +390,22 @@ impl<St> EventSourceSystem<St> {
 }
 
 impl<St: Store> EventSourceSystem<St> {
+    /// The journal this system's wiring appends to and reads from.
+    ///
+    /// It is the supplier's journal, observed by this system: every append it
+    /// accepts is reported to the system's projection activator, which is how
+    /// a passivated projector learns at once that there is something for it to
+    /// project. Aggregates, projectors, the [contingent](Self::to_contingent)
+    /// view and saga wiring all take their journal from here. A journal taken
+    /// from the supplier itself ([`PersistenceProvider::event_store`]) reaches
+    /// the same records but reports nothing, so what is appended through it
+    /// reaches a passivated projector only through the projection watcher.
+    pub fn event_store(&self) -> Journal {
+        self.inner
+            .node
+            .observed(self.inner.persistence.event_store())
+    }
+
     /// Resolve the aggregate `id`, activating it if this node has no activation
     /// for it, and return a reference to it.
     ///
@@ -404,7 +498,7 @@ impl<St: Store> EventSourceSystem<St> {
     pub fn to_contingent(&self) -> ContingentSystem {
         ContingentSystem::new(
             self.inner.node.clone(),
-            self.inner.persistence.event_store(),
+            self.event_store(),
             self.inner.persistence.store().snapshot_slot(),
         )
     }
@@ -488,6 +582,21 @@ impl<St: ProjectionOffsetSlot> EventSourceSystem<St> {
         Proj: Send + Sync + 'static,
     {
         ProjectorProps::new(projection_id, producer).hosted(self.clone())
+    }
+
+    /// This system's projection activator, starting it — and, unless the
+    /// builder disabled it, its watcher — on the first call.
+    pub(crate) async fn projection_activator(&self) -> ProcessProxy<ProjectionActivator> {
+        self.inner
+            .node
+            .projection_activator(|interval| {
+                WatcherSource::new(
+                    self.event_store(),
+                    self.persistence().projection_offsets(),
+                    interval,
+                )
+            })
+            .await
     }
 }
 

@@ -1,6 +1,6 @@
 //! An aggregate's activation stops after the idle timeout its props name, and
-//! the next dispatch replays it back; a projector is not stopped by the system
-//! default idle timeout.
+//! the next dispatch replays it back; a projector under the system default
+//! idle timeout still projects what is appended after a quiet journal.
 //!
 //! ```gherkin
 //!   Scenario: an activation passivates on the props' idle timeout and is replayed back
@@ -23,11 +23,11 @@
 //!         an entry point that takes no props
 //!     Then the activation stops after the default
 //!
-//!   Scenario: a projector is not stopped by the system default
+//!   Scenario: a projector projects what arrives after the system default
 //!     Given a system with a short default idle timeout
 //!     And a projector that has caught up
 //!     When the journal stays quiet for longer than the default
-//!     And one event is appended afterwards
+//!     And one event is appended afterwards through the system's journal
 //!     Then the projector projects it
 //! ```
 //!
@@ -434,7 +434,7 @@ async fn an_aggregate_spawned_through_the_contingent_view_stops_on_the_system_de
     );
 }
 
-// Scenario: a projector is not stopped by the system default
+// Scenario: a projector projects what arrives after the system default
 
 /// How many records a projection has applied, and a signal for each one.
 #[derive(Clone, Default)]
@@ -503,14 +503,15 @@ async fn append(journal: &Journal, stream: &AggregateId, sequence: u64) {
 }
 
 /// The poller hands the projector nothing on an empty read, so a quiet journal
-/// is a projector receiving no messages. A projector left on the system default
-/// stops during the quiet period and takes its poller with it, and the event
-/// appended afterwards is never projected.
+/// is a projector receiving no messages, and a projector left on the system
+/// default stops during the quiet period. The event appended afterwards goes
+/// through the system's journal, whose append notification is what brings the
+/// projector back to project it.
 #[tokio::test(start_paused = true)]
-async fn a_projector_outlives_the_system_default_through_a_quiet_journal() {
+async fn a_projector_projects_what_arrives_after_a_quiet_journal_under_the_system_default() {
     // Given: a projector that has caught up with the one record in its stream
     let system = system_on(with_default().await);
-    let journal = system.persistence().event_store();
+    let journal = system.event_store();
     let stream = AggregateId::new("aggregate-idle-timeout-projector");
     let model = ReadModel::default();
     let projector_model = model.clone();

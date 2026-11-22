@@ -30,11 +30,10 @@
 //! through the handle this file constructed, rather than through anything the
 //! system answers with. Props that reached a store of their own would hand
 //! back a working proxy and leave nothing behind here. The projector scenario
-//! is the exception: it also looks the returned proxy's pid up in the
-//! system's own process system, because a projector proxy names a process
-//! rather than an aggregate, so a process identifier is available to check
-//! directly — unlike the aggregate scenario below, which has no such
-//! identifier and so falls back to the resolve rule.
+//! also asks the returned handle whether its projector runs: the handle
+//! answers through the projection activator of the system the props came
+//! from, which starts every projector of that system as its own child, on that
+//! system's process system.
 //!
 //! "Runs on the system the props came from" is observed through the resolve
 //! rule rather than through a process identifier, because an aggregate
@@ -331,15 +330,11 @@ async fn projector_props_from_a_system_spawn_without_a_process_system() {
         .spawn()
         .await;
 
-    // Then: the process the proxy names is one this system is running
+    // Then: the system the props came from runs the projector
     assert!(
-        system
-            .process_system()
-            .lookup(projector.pid())
-            .await
-            .is_some(),
-        "a projector spawned from a system runs on that system's process \
-         system, so the system's own registry is where its process is found"
+        projector.is_active().await,
+        "a projector spawned from a system is started by that system's projection \
+         activator, so the system reports it running"
     );
 
     // And: it read the store the system was built on

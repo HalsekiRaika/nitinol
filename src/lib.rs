@@ -257,7 +257,7 @@ pub mod eventsource {
     };
     pub use nitinol_eventsource::{
         EventEnvelope, EventSet, EventUnset, OriginSet, OriginUnset, ProjectionContext,
-        ProjectionId, Projector, ProjectorProps, TxProvider,
+        ProjectionId, Projector, ProjectorHandle, ProjectorProps, TxProvider,
     };
     pub use nitinol_eventsource::{SnapshotPersistor, SnapshotPersistorProxy};
 }

@@ -97,6 +97,12 @@
 //! [`AggregateProps::with_idle_timeout`] sets that timeout per process,
 //! overriding the system default.
 //!
+//! A projector passivates the same way, under
+//! [`ProjectorProps::with_idle_timeout`]. The system's projection activator
+//! starts it again when an event it follows is appended: at once for an append
+//! through the system's own journal, and within the projection watcher's
+//! interval for one by another writer to the same store.
+//!
 //! # Observing lost races
 //!
 //! An activation numbers its appends from the sequence it replayed to, and the
@@ -194,7 +200,7 @@ pub mod test_helpers;
 
 pub use self::projection::{
     EventEnvelope, EventSet, EventUnset, OriginSet, OriginUnset, ProjectionContext, ProjectionId,
-    Projector, ProjectorProps, TxProvider,
+    Projector, ProjectorHandle, ProjectorProps, TxProvider,
 };
 
 pub use self::durable_stream::{
@@ -202,8 +208,9 @@ pub use self::durable_stream::{
     DEFAULT_BATCH_LIMIT, DEFAULT_POLL_INTERVAL,
 };
 
-// The message a projector's poller hands it and the answer it reads back. They
-// appear in `ProjectorProcess`'s `Receive` impl, so they are public for that
-// bound to be nameable, and hidden because nothing outside this crate sends one.
+// The message a poller hands what it reads for and the answer it reads back.
+// Hidden because nothing outside this crate sends one; still public because
+// they were nameable at this path, and taking a public path away is a breaking
+// change of its own.
 #[doc(hidden)]
 pub use self::durable_stream::{PolledBatch, SettledThrough};

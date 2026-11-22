@@ -213,7 +213,7 @@ where
             SupervisionStrategy::restart(POLLER_RESTART_MAX_RETRIES, POLLER_RESTART_WITHIN)
                 .expect("POLLER_RESTART_WITHIN is a positive duration constant");
 
-        let driver = IntervalDriver::<DurablePollerProcess<T>>::new(poll_interval);
+        let driver = IntervalDriver::<DurablePollerProcess<T>>::new(poll_interval, None);
         let poller_name = proxy::shared_poller_name(stream_proxy.pid());
         let props = Props::new(move || DurablePollerProcess {
             store: producer_store.clone(),
