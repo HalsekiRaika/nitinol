@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   offset.
 - (`nitinol-persistence`): `AppendObserver`, and `Journal::observed_by`, which
   reports every append a journal accepts to an observer.
+- (`nitinol-runtime`): `ProcessState` and `ProcessProxy::state`, which reads
+  whether a process is `Starting`, `Running`, `Stopping` or `Stopped`.
 
 ### Changed
 
@@ -49,6 +51,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - (`nitinol-eventsource`): an `AtMostOnce` projection whose offset save fails no
   longer runs the batch's handlers; the batch is redelivered, so a projector
   that stops and starts again does not handle the same event twice.
+- (`nitinol-runtime`): a process closes its mailbox as soon as it starts
+  stopping, so an `ask` waiting there returns `AskError::ReplyDropped` and a
+  later `tell` / `ask` goes to the dead letters. A child that asks its parent
+  from inside a handler no longer deadlocks the parent stopping and waiting
+  for it.
 
 ## [0.8.0] - 2026-11-17
 

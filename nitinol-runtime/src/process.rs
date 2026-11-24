@@ -51,7 +51,7 @@ pub use self::{
     resident::Resident,
     stream::{Stream, StreamProps},
     subscriber::{Subscriber, SubscriberContext},
-    watch::{Terminated, TerminatedReason},
+    watch::{ProcessState, Terminated, TerminatedReason},
 };
 
 pub(crate) use self::dead_letter::{DeadLetterProcess, DeadLetterProxy};
@@ -77,6 +77,10 @@ pub trait Process: 'static + Sync + Send {
     }
     /// Called when the process stops, and before each restart. Not called when
     /// the process is poisoned. Returns nothing.
+    ///
+    /// When the process stops (not on a restart), its mailbox is already
+    /// closed as `on_stop` runs, so a message sent to the process itself goes
+    /// to the dead letters.
     fn on_stop(&mut self, ctx: &mut ProcessContext<Self>) -> impl Future<Output = ()> + Send
     where
         Self: Sized,

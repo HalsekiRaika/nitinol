@@ -186,6 +186,8 @@ mod saga_manager_resume_leaves_deadlines_to_the_index;
 mod saga_manager_single_subscription;
 #[path = "integration/saga_manager_stall_is_source_local.rs"]
 mod saga_manager_stall_is_source_local;
+#[path = "integration/saga_manager_stop_while_partition_asks.rs"]
+mod saga_manager_stop_while_partition_asks;
 #[path = "integration/saga_multi_source_independent_cursors.rs"]
 mod saga_multi_source_independent_cursors;
 #[path = "integration/saga_multi_source_observation.rs"]
