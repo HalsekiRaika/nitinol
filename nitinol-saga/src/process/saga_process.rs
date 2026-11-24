@@ -715,6 +715,10 @@ mod tests {
             > = Box::pin(futures_util::stream::empty());
             Ok(stream)
         }
+
+        async fn head(&self) -> Result<Option<u64>, LoadError> {
+            Ok(None)
+        }
     }
 
     const OBSERVED: EventType = EventType::new(

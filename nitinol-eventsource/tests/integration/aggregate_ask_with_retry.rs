@@ -190,6 +190,10 @@ impl EventStore for OvertakenStore {
     async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
         self.inner.load(query).await
     }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
+    }
 }
 
 /// A store whose first append fails in the backend and whose later appends go
@@ -226,6 +230,10 @@ impl EventStore for FailFirstAppendStore {
 
     async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
         self.inner.load(query).await
+    }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
     }
 }
 

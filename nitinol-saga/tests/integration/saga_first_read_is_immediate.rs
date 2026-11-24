@@ -109,6 +109,10 @@ impl EventStore for UpstreamRecorder {
         }
         self.inner.load(query).await
     }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
+    }
 }
 
 #[tokio::test(start_paused = true)]

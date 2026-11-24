@@ -574,6 +574,10 @@ impl EventStore for ProbeJournal {
         }
         loaded
     }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
+    }
 }
 
 pub type ProbeStore = CustomStore<Unprovided, Unprovided, InMemoryOffsetStore>;

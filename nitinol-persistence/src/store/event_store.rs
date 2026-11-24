@@ -200,6 +200,35 @@ pub trait EventStore: EventStoreClone + Send + Sync {
     /// `nitinol-persistence/tests/event_store_load_query_conjunction.rs`
     /// against the reference implementation.
     async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError>;
+
+    /// The highest `global_sequence` this store has assigned, or `None` if it
+    /// has assigned none.
+    ///
+    /// This is where the journal ends: a reader that wants only what is
+    /// appended from now on asks for the head and follows the global order
+    /// from the position after it, without reading the journal through to
+    /// find its end.
+    ///
+    /// # HEAD-1: the head is at or beyond every acknowledged append
+    ///
+    /// Once [`append`](EventStore::append) has returned `Ok(outcome)`, `head()`
+    /// returns a position at or above the last of
+    /// `outcome.assigned_sequences`.
+    ///
+    /// Fixed by `the_head_reaches_every_acknowledged_append` in the
+    /// deterministic half of `nitinol-store-conformance`, and its detection by
+    /// `a_head_short_of_the_last_acknowledged_append_is_reported_as_a_head_1_violation`.
+    ///
+    /// # HEAD-2: nothing lies beyond the head
+    ///
+    /// If `head()` returns `Some(h)`, a [`load`](EventStore::load) of
+    /// [`LoadQuery::from_global(h + 1)`](LoadQuery::from_global) serves nothing
+    /// at that moment: the journal is complete up to `h`.
+    ///
+    /// Fixed by `nothing_lies_beyond_the_head` in the deterministic half of
+    /// `nitinol-store-conformance`, and its detection by
+    /// `a_head_with_events_beyond_it_is_reported_as_a_head_2_violation`.
+    async fn head(&self) -> Result<Option<u64>, LoadError>;
 }
 
 /// How a journal whose backend type has been erased is cloned.

@@ -399,6 +399,10 @@ impl EventStore for GatedJournal {
         self.gate.passed().await;
         self.inner.load(query).await
     }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
+    }
 }
 
 type GatedStore = CustomStore<Unprovided, InMemoryOffsetStore, Unprovided>;
@@ -536,6 +540,10 @@ impl EventStore for FlakyJournal {
             ))));
         }
         self.inner.load(query).await
+    }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
     }
 }
 

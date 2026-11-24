@@ -177,6 +177,21 @@ impl EventStore for InMemoryEventStore {
             items: items.into_iter(),
         }))
     }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        let state = self
+            .state
+            .lock()
+            .expect("in-memory event state lock was poisoned by a panicking holder");
+
+        // Numbering starts at 1 and only a committed write advances it, so the
+        // position before the next one is the last assigned — unless that is 0,
+        // which no event is ever assigned.
+        Ok(state
+            .next_global_sequence
+            .checked_sub(1)
+            .filter(|last| *last > 0))
+    }
 }
 
 /// Provides a Vec of owned LoadedEvents as a Stream without holding external borrows.

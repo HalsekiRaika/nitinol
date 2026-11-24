@@ -106,4 +106,8 @@ impl EventStore for RecordingJournal {
             .push((query.stream_key.clone(), Instant::now()));
         self.inner.load(query).await
     }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
+    }
 }

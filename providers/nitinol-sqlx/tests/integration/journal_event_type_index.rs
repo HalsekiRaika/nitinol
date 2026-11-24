@@ -26,6 +26,7 @@
 
 use super::fixture;
 use super::harness;
+use super::statistics::{analyze, index_reads, publish_statistics, sequential_rows_read};
 
 use linkme::distributed_slice;
 use nitinol_persistence::store::Journal;
@@ -33,7 +34,6 @@ use nitinol_persistence::{
     AppendingEvent, EventRegistryEntry, EventType, Family, LoadQuery, TypeName, EVENT_REGISTRY,
 };
 use nitinol_sqlx::PostgresEventStore;
-use sqlx::PgPool;
 
 /// The type the consumer follows — rare on the streams it is stored in.
 const FOLLOWED: EventType = EventType::new(Family::new("index.probe"), TypeName::new("Followed"));
@@ -62,14 +62,6 @@ const FOLLOWED_EVERY: u64 = 200;
 /// the ones served.
 const FLOOR: u64 = 12_000;
 
-/// What the database counted against one index.
-struct IndexReads {
-    /// How many times a scan of this index was started.
-    scans: i64,
-    /// How many index entries those scans returned.
-    entries: i64,
-}
-
 #[tokio::test]
 async fn a_load_for_one_event_type_reads_that_type_rather_than_the_journal() {
     let Some(backend) = harness::postgres_backend().await else {
@@ -89,7 +81,7 @@ async fn a_load_for_one_event_type_reads_that_type_rather_than_the_journal() {
     analyze(&pool).await;
 
     publish_statistics(&pool).await;
-    let before = index_reads(&pool).await;
+    let before = index_reads(&pool, INDEX).await;
     let sequential_before = sequential_rows_read(&pool).await;
 
     let served = fixture::observe(
@@ -115,7 +107,7 @@ async fn a_load_for_one_event_type_reads_that_type_rather_than_the_journal() {
     );
 
     publish_statistics(&pool).await;
-    let after = index_reads(&pool).await;
+    let after = index_reads(&pool, INDEX).await;
     let sequential_after = sequential_rows_read(&pool).await;
 
     let scans = after.scans - before.scans;
@@ -192,63 +184,4 @@ fn row(sequence: u64, event_type: EventType) -> AppendingEvent {
     // The payload is the same for every row: what is measured is which rows the
     // store had to read, not what they carried.
     fixture::typed(sequence, event_type, b"{}")
-}
-
-/// Let the planner see what was seeded.
-///
-/// Without it the planner is choosing against the estimates of an empty table,
-/// so what a plan did would say nothing about the index.
-async fn analyze(pool: &PgPool) {
-    sqlx::query("ANALYZE nitinol_journal")
-        .execute(pool)
-        .await
-        .expect("a migrated schema can be analyzed");
-}
-
-/// Publish what this connection has done so far to the shared counters.
-///
-/// A backend holds its own tally and reports it when a transaction of its own
-/// ends, and not more often than once a second unless asked. Asking is what
-/// makes a reading taken straight after a load a reading of that load.
-async fn publish_statistics(pool: &PgPool) {
-    sqlx::query("SELECT pg_stat_force_next_flush()")
-        .execute(pool)
-        .await
-        .expect("a database this run reached publishes its own activity counters");
-}
-
-async fn index_reads(pool: &PgPool) -> IndexReads {
-    let row: Option<(i64, i64)> = sqlx::query_as(
-        r#"
-        SELECT coalesce(idx_scan, 0), coalesce(idx_tup_read, 0)
-          FROM pg_stat_all_indexes
-         WHERE schemaname = current_schema() AND indexrelname = $1
-        "#,
-    )
-    .bind(INDEX)
-    .fetch_optional(pool)
-    .await
-    .expect("the statistics views answer on a database this run reached");
-
-    let (scans, entries) = row.unwrap_or_else(|| {
-        panic!(
-            "the provider's migrations must create {INDEX}: without it a consumer of one event \
-             type is served by the global-order index alone"
-        )
-    });
-    IndexReads { scans, entries }
-}
-
-/// How many rows the journal has been read sequentially.
-async fn sequential_rows_read(pool: &PgPool) -> i64 {
-    sqlx::query_scalar(
-        r#"
-        SELECT coalesce(seq_tup_read, 0)
-          FROM pg_stat_all_tables
-         WHERE schemaname = current_schema() AND relname = 'nitinol_journal'
-        "#,
-    )
-    .fetch_one(pool)
-    .await
-    .expect("the statistics views answer for a table this run migrated")
 }

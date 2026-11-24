@@ -503,6 +503,10 @@ impl EventStore for FailFirstLoadStore {
         }
         self.inner.load(query).await
     }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
+    }
 }
 
 /// C-2's "already created" answer assumes the activation replayed far enough to

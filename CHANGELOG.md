@@ -36,6 +36,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   waker, so a handler that calls `ctx.waker().wake()` has a driver that
   honours it stop waiting and deliver its next event at once; drivers that do
   not override `attach_waker` are unaffected.
+- (`nitinol-persistence`, `nitinol-sqlx`, `nitinol-store-conformance`):
+  `EventStore::head` and `Journal::head` answer the highest `global_sequence`
+  the store has assigned, or `None` if it has assigned none, under the clauses
+  `HEAD-1` and `HEAD-2`; `InMemoryEventStore` and `PostgresEventStore`
+  implement it, the latter off the existing global-order index, and
+  `verify_deterministic` checks both clauses. `head` is a required method with
+  no default implementation, so every `EventStore` implementor has to add it.
 
 ### Changed
 

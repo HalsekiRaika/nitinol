@@ -95,6 +95,10 @@ impl EventStore for RecordingStore {
     async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
         self.inner.load(query).await
     }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
+    }
 }
 
 /// A store that refuses its first append and accepts every one after it.
@@ -126,6 +130,10 @@ impl EventStore for FailOnceStore {
     async fn load(&self, _query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
         let empty = futures_util::stream::empty::<Result<LoadedEvent, LoadError>>();
         Ok(Box::pin(empty))
+    }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        Ok(None)
     }
 }
 

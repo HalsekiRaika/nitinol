@@ -15,6 +15,8 @@ mod event_registry_constructors_are_not_public;
 mod event_registry_linked;
 #[path = "integration/event_store.rs"]
 mod event_store;
+#[path = "integration/event_store_head.rs"]
+mod event_store_head;
 #[path = "integration/event_store_load_query_conjunction.rs"]
 mod event_store_load_query_conjunction;
 #[path = "integration/event_store_occ.rs"]

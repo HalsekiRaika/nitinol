@@ -177,6 +177,10 @@ impl EventStore for StallingStore {
         }
         self.inner.load(query).await
     }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
+    }
 }
 
 // Helpers

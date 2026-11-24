@@ -489,6 +489,10 @@ impl EventStore for SourceJournal {
         }
         self.inner.load(query).await
     }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
+    }
 }
 
 /// Wait until at least `want` reads of `stream` have been made, then answer the

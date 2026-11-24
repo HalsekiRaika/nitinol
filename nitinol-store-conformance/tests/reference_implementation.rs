@@ -4,7 +4,7 @@
 //! ```gherkin
 //! Scenario: the reference event store conforms
 //!   Given InMemoryEventStore
-//!   When the kit's OCC-1 … OCC-5 verification is run
+//!   When the kit's OCC-1 … OCC-5, HEAD-1 and HEAD-2 verification is run
 //!   Then every clause holds
 //!
 //! Scenario: the reference snapshot store conforms

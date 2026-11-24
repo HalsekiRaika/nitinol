@@ -514,6 +514,10 @@ impl EventStore for AppendRefusingEventStore {
     async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
         self.inner.load(query).await
     }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
+    }
 }
 
 /// A saga that declares no mapping at all, so the trait's default answers for
@@ -928,6 +932,10 @@ impl EventStore for RecordingEventStore {
             LoadFault::None => self.inner.load(query).await,
             LoadFault::Panic => panic!("the fixture store panics on load call {nth}"),
         }
+    }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
     }
 }
 

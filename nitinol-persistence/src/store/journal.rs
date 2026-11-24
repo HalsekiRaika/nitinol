@@ -119,6 +119,19 @@ impl Journal {
     pub async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
         self.store.load(query).await
     }
+
+    /// The highest `global_sequence` the registered store has assigned, or
+    /// `None` if it has assigned none.
+    ///
+    /// [`EventStore::head`]'s clauses, unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LoadError::Backend`] if the registered store fails to answer
+    /// where the journal ends.
+    pub async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.store.head().await
+    }
 }
 
 /// [`TypedLoad::read`]'s clauses, unchanged: a journal is not an event store,

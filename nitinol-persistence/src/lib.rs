@@ -57,7 +57,8 @@
 //!
 //! All three store traits carry behavioural contracts a backend has to
 //! reproduce, stated as labelled clauses on the trait itself:
-//! [`store::EventStore`] carries `OCC-1` … `OCC-5` and `LOAD-1`,
+//! [`store::EventStore`] carries `OCC-1` … `OCC-5`, `LOAD-1`, `HEAD-1` and
+//! `HEAD-2`,
 //! [`store::SnapshotStore`] carries `SNAP-1` … `SNAP-4`, and
 //! [`store::OffsetStore`] carries `OFS-1` … `OFS-6`.  One OCC clause is
 //! broken silently by the most obvious way to number events in a relational

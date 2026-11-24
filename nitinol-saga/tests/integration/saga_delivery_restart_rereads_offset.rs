@@ -97,6 +97,10 @@ impl EventStore for PanicOnHostLoad {
         }
         loaded
     }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
+    }
 }
 
 #[tokio::test]

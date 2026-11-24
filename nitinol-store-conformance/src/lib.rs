@@ -4,7 +4,9 @@
 //! states the optimistic-concurrency-control contract as clauses `OCC-1` …
 //! `OCC-5`, and
 //! [`EventStore::load`](nitinol_persistence::store::EventStore::load) states as
-//! `LOAD-1` what a query naming more than one condition means.
+//! `LOAD-1` what a query naming more than one condition means, and
+//! [`EventStore::head`](nitinol_persistence::store::EventStore::head) states as
+//! `HEAD-1` and `HEAD-2` where the journal ends.
 //! [`SnapshotStore`](nitinol_persistence::store::SnapshotStore) states
 //! `SNAP-1` … `SNAP-4` and
 //! [`OffsetStore`](nitinol_persistence::store::OffsetStore) states
@@ -18,7 +20,7 @@
 //!
 //! | Contract | Entry points |
 //! |---|---|
-//! | `EventStore` (`OCC-1` … `OCC-5`, `LOAD-1`) | [`verify`], [`verify_deterministic`], [`verify_under_concurrency`] |
+//! | `EventStore` (`OCC-1` … `OCC-5`, `LOAD-1`, `HEAD-1`, `HEAD-2`) | [`verify`], [`verify_deterministic`], [`verify_under_concurrency`] |
 //! | `SnapshotStore` (`SNAP-1` … `SNAP-4`) | [`snapshot::verify`] |
 //! | `OffsetStore` (`OFS-1` … `OFS-6`) | [`offset::verify`], [`offset::verify_deterministic`], [`offset::verify_under_concurrency`] |
 //! | `Store` (`PRV-1` … `PRV-5`) | [`provider::verify`] and one entry point per slot |

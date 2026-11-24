@@ -157,6 +157,10 @@ impl EventStore for SourceTimeline {
         }
         self.inner.load(query).await
     }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
+    }
 }
 
 /// Wait until the delivery host has polled `store` at least `want` times.

@@ -263,6 +263,10 @@ impl EventStore for ReplayRecorder {
             }
         })))
     }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
+    }
 }
 
 /// A snapshot store that refuses every save and holds nothing.
@@ -321,6 +325,10 @@ impl EventStore for FailFirstLoadStore {
             ));
         }
         self.inner.load(query).await
+    }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
     }
 }
 

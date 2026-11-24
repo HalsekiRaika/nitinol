@@ -29,6 +29,8 @@ pub async fn verify_deterministic<S: StoreUnderTest>(store: &S) {
     a_refusal_leaves_every_observable_part_of_the_store_as_it_was(store).await;
     a_prefix_and_a_position_select_the_events_satisfying_both(store).await;
     a_prefix_no_stored_event_is_within_selects_nothing(store).await;
+    the_head_reaches_every_acknowledged_append(store).await;
+    nothing_lies_beyond_the_head(store).await;
 }
 
 /// OCC-1. A `(stream, sequence)` pair the stream already holds is refused, and
@@ -418,6 +420,88 @@ async fn a_prefix_no_stored_event_is_within_selects_nothing<S: StoreUnderTest>(s
     }
 }
 
+/// HEAD-1. Once an append has been acknowledged, the head is at or beyond the
+/// last position it was assigned.
+///
+/// A batch is what tells a head at the end of the latest append apart from one
+/// at its start: a single event's first position is its last.
+async fn the_head_reaches_every_acknowledged_append<S: StoreUnderTest>(store: &S) {
+    const CLAUSE: &str = "HEAD-1";
+    const FIRST: &str = "occ.conformance.head.reach.first";
+    const SECOND: &str = "occ.conformance.head.reach.second";
+
+    let backend = store.bring_up().await;
+    let appends: [(&str, Vec<AppendingEvent>); 3] = [
+        (FIRST, vec![fixture::fact(1, b"single")]),
+        (
+            SECOND,
+            vec![
+                fixture::fact(1, b"batch-1"),
+                fixture::fact(2, b"batch-2"),
+                fixture::fact(3, b"batch-3"),
+            ],
+        ),
+        (FIRST, vec![fixture::fact(2, b"after-the-batch")]),
+    ];
+
+    for (key, events) in appends {
+        let assigned = committed(CLAUSE, &backend, key, events).await;
+        let tail = highest(assigned.clone());
+        let head = head(&backend).await;
+        assert!(
+            head.is_some_and(|head| head >= tail),
+            "{CLAUSE} is broken: an append to {key:?} was acknowledged with the global_sequences \
+             {assigned:?} and the head is then {head:?}; once an append is acknowledged the head \
+             is at or beyond the last position it was assigned"
+        );
+    }
+}
+
+/// HEAD-2. Nothing is served beyond the head: a load from the position after it
+/// serves nothing.
+///
+/// The head is judged after every append the store takes and again after one
+/// it refuses, naming a stream whose highest position is below the journal's,
+/// so a head kept per stream rather than for the journal is caught from this
+/// side.
+async fn nothing_lies_beyond_the_head<S: StoreUnderTest>(store: &S) {
+    const CLAUSE: &str = "HEAD-2";
+    const FIRST: &str = "occ.conformance.head.end.first";
+    const SECOND: &str = "occ.conformance.head.end.second";
+
+    let backend = store.bring_up().await;
+
+    committed(CLAUSE, &backend, FIRST, vec![fixture::fact(1, b"single")]).await;
+    nothing_beyond(CLAUSE, &backend, "an append to one stream").await;
+
+    committed(
+        CLAUSE,
+        &backend,
+        SECOND,
+        vec![
+            fixture::fact(1, b"batch-1"),
+            fixture::fact(2, b"batch-2"),
+            fixture::fact(3, b"batch-3"),
+        ],
+    )
+    .await;
+    nothing_beyond(CLAUSE, &backend, "a batch appended to another").await;
+
+    conflicted(
+        CLAUSE,
+        "a second append of sequence 1",
+        backend
+            .append(FIRST, vec![fixture::fact(1, b"again")])
+            .await,
+    );
+    nothing_beyond(
+        CLAUSE,
+        &backend,
+        "a refused append to the stream holding the lower position",
+    )
+    .await;
+}
+
 // Staging and judging a clause
 
 /// Every observable field of everything the store holds, in the order a load
@@ -499,6 +583,39 @@ fn conflicted(clause: &str, what: &str, outcome: Result<AppendOutcome, AppendErr
 fn path(text: &str) -> MaterializedPath {
     text.parse()
         .expect("a dotted literal with no empty segment is a materialized path")
+}
+
+/// Where the store says the journal ends.
+///
+/// A store that cannot answer at all is not one any clause can judge, so the
+/// panic here names no clause, for the reason [`fixture::observe`] gives.
+async fn head(backend: &Journal) -> Option<u64> {
+    backend.head().await.unwrap_or_else(|failure| {
+        panic!("the suite cannot judge a store that fails to answer its head: {failure}")
+    })
+}
+
+/// Check that a store holding committed events answers a head, and that a load
+/// from the position after it serves nothing.
+async fn nothing_beyond(clause: &str, backend: &Journal, after: &str) {
+    let Some(head) = head(backend).await else {
+        panic!(
+            "{clause} is broken: after {after} the store holds committed events and answers no \
+             head, so a reader cannot ask for what lies beyond where the journal ends"
+        );
+    };
+    let beyond: Vec<u64> = fixture::observe(backend, LoadQuery::from_global(head + 1))
+        .await
+        .into_iter()
+        .map(|event| event.global_sequence)
+        .collect();
+    assert!(
+        beyond.is_empty(),
+        "{clause} is broken: after {after} the head is {head}, and a load from {} served the \
+         global_sequences {beyond:?}; a reader taking the head as where the journal ends never \
+         asks for them",
+        head + 1
+    );
 }
 
 /// Where an append left the numbering off.

@@ -458,6 +458,10 @@ impl EventStore for RecordingStore {
     async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
         self.inner.load(query).await
     }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
+    }
 }
 
 /// Rejects the first `budget` appends `reject` answers `true` for, and accepts
@@ -527,6 +531,10 @@ impl EventStore for FailFirstAppendsStore {
 
     async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
         self.inner.load(query).await
+    }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
     }
 }
 
@@ -600,6 +608,10 @@ impl EventStore for DuplicatingStore {
             .collect();
         Ok(Box::pin(futures_util::stream::iter(doubled)))
     }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
+    }
 }
 
 type Queries = Arc<Mutex<Vec<LoadQuery>>>;
@@ -638,6 +650,10 @@ impl EventStore for QueryRecordingStore {
                 .push(query.clone());
         }
         self.inner.load(query).await
+    }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
     }
 }
 

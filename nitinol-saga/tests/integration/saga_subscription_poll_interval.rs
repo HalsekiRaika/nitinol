@@ -138,6 +138,10 @@ impl EventStore for SourcePollRecorder {
         }
         self.inner.load(query).await
     }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
+    }
 }
 
 /// The store the observer's system is built over: the recording journal, plus

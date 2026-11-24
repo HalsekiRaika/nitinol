@@ -12,6 +12,16 @@
 //!   When the kit's deterministic verification is run
 //!   Then it fails, naming OCC-3
 //!
+//! Scenario: a store whose head falls short of the append it acknowledged
+//!   Given a store answering the first position of its latest batch as its head
+//!   When the kit's deterministic verification is run
+//!   Then it fails, naming HEAD-1
+//!
+//! Scenario: a store whose head has events beyond it
+//!   Given a store answering the highest position of the stream named last
+//!   When the kit's deterministic verification is run
+//!   Then it fails, naming HEAD-2
+//!
 //! Scenario: a snapshot store that answers with a state no save ever wrote
 //!   Given a store answering with the latest sequence and the first payload
 //!   When the kit's snapshot verification is run
@@ -93,6 +103,30 @@ async fn a_partially_visible_batch_is_reported_as_an_occ_3_violation() {
         Fault::WithholdLastEventOfMultiEventBatch,
     ))
     .await;
+}
+
+/// A head short of the tail an append acknowledged has a reader starting from
+/// it take events already in the journal for events still to come. Only a
+/// batch tells it apart — a single-event append's first position is its last —
+/// and no earlier clause asks for the head, so the first clause to fail is
+/// HEAD-1.
+#[tokio::test]
+#[should_panic(expected = "HEAD-1")]
+async fn a_head_short_of_the_last_acknowledged_append_is_reported_as_a_head_1_violation() {
+    verify_deterministic(&FaultyStore::injecting(
+        Fault::HeadAtTheFirstEventOfTheLatestBatch,
+    ))
+    .await;
+}
+
+/// A head with events beyond it has a reader taking it as where the journal
+/// ends never ask for those events. This store answers the head right after
+/// every append it takes, so HEAD-1 holds; it is the refusal of a call naming
+/// another stream that leaves the head behind, and HEAD-2 must name it.
+#[tokio::test]
+#[should_panic(expected = "HEAD-2")]
+async fn a_head_with_events_beyond_it_is_reported_as_a_head_2_violation() {
+    verify_deterministic(&FaultyStore::injecting(Fault::HeadOfTheStreamLastNamed)).await;
 }
 
 /// An aggregate that has never been snapshotted is a condition, not a failure:

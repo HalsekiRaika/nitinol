@@ -193,6 +193,10 @@ impl EventStore for SlowEventStore {
         tokio::time::sleep(self.load_delay).await;
         self.inner.load(query).await
     }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
+    }
 }
 
 // Helpers: a system, and the spawn helpers
