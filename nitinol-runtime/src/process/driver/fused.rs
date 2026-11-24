@@ -1,5 +1,5 @@
 use crate::error::HandlerError;
-use crate::process::driver::{Driver, PipeHandle};
+use crate::process::driver::{Driver, PipeHandle, ProcessWaker};
 use crate::process::{Process, ProcessContext};
 
 /// Wraps a [`Driver`] so that exhaustion (`next()` returning `None`) silently
@@ -63,5 +63,9 @@ where
 
     fn pipe_handle(&self) -> Option<PipeHandle<P>> {
         self.inner.pipe_handle()
+    }
+
+    fn attach_waker(&mut self, waker: ProcessWaker) {
+        self.inner.attach_waker(waker);
     }
 }

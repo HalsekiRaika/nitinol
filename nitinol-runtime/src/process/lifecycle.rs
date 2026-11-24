@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use crate::ident::{Pid, ProcessName};
 use crate::process::dead_letter::DeadLetterProxy;
 use crate::process::driver::{
-    Combine, Driver, FusedDriver, MessageDriver, PipeDriver, StashDriver, StashHandle,
+    Combine, Driver, FusedDriver, MessageDriver, PipeDriver, ProcessWaker, StashDriver, StashHandle,
 };
 use crate::process::pid_set::PidSet;
 use crate::process::props::{MailboxCapacity, PipeCapacity, StashCapacity, SupervisionStrategy};
@@ -182,6 +182,8 @@ async fn lifecycle_loop<P: Process, D: Driver<P>>(args: LifecycleLoopArgs<P, D>)
     let lifecycle_state = self_proxy.state.clone();
 
     let pipe_handle = driver.pipe_handle();
+    let waker = ProcessWaker::new();
+    driver.attach_waker(waker.clone());
 
     let mut ctx = ProcessContext {
         pid,
@@ -192,6 +194,7 @@ async fn lifecycle_loop<P: Process, D: Driver<P>>(args: LifecycleLoopArgs<P, D>)
         self_proxy,
         pipe_handle,
         stash_handle: Some(stash_handle),
+        waker,
         pending_reply: None,
         parent,
         children: PidSet::new(),

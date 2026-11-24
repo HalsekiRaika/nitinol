@@ -9,6 +9,7 @@ use crate::ident::Pid;
 /// A process moves through the states in order and never goes back. A
 /// supervision restart is not a stop: the process stays `Running` through it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum ProcessState {
     /// The process has been spawned and its first `on_start` has not finished
     /// yet.

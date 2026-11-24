@@ -1,7 +1,7 @@
 use futures_util::future::Either;
 
 use crate::error::HandlerError;
-use crate::process::driver::{Driver, PipeHandle};
+use crate::process::driver::{Driver, PipeHandle, ProcessWaker};
 use crate::process::{Process, ProcessContext};
 
 /// Binary composition of two [`Driver`]s into one.
@@ -19,6 +19,7 @@ use crate::process::{Process, ProcessContext};
 ///   returns `false` disables the idle timer for the whole loop.
 /// - `pipe_handle` returns the first non-`None` child handle, preferring the
 ///   left.
+/// - `attach_waker` hands a clone of the waker to both children.
 pub struct Combine<L, R> {
     left: L,
     right: R,
@@ -65,6 +66,11 @@ where
 
     fn pipe_handle(&self) -> Option<PipeHandle<P>> {
         self.left.pipe_handle().or_else(|| self.right.pipe_handle())
+    }
+
+    fn attach_waker(&mut self, waker: ProcessWaker) {
+        self.left.attach_waker(waker.clone());
+        self.right.attach_waker(waker);
     }
 }
 

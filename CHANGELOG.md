@@ -31,6 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reports every append a journal accepts to an observer.
 - (`nitinol-runtime`): `ProcessState` and `ProcessProxy::state`, which reads
   whether a process is `Starting`, `Running`, `Stopping` or `Stopped`.
+- (`nitinol-runtime`): `ProcessWaker`, `Driver::attach_waker` and
+  `ProcessContext::waker`. The lifecycle hands every process's driver its
+  waker, so a handler that calls `ctx.waker().wake()` has a driver that
+  honours it stop waiting and deliver its next event at once; drivers that do
+  not override `attach_waker` are unaffected.
 
 ### Changed
 
