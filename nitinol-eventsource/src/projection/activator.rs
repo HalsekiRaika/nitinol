@@ -11,13 +11,10 @@ use std::sync::Arc;
 
 use nitinol_persistence::error::OffsetError;
 use nitinol_persistence::EventType;
-use nitinol_runtime::error::HandlerError;
 use nitinol_runtime::ident::Pid;
-use nitinol_runtime::process::{
-    Driver, Process, ProcessContext, ProcessProxy, Receive, Terminated,
-};
+use nitinol_runtime::process::{Process, ProcessContext, ProcessProxy, Receive, Terminated};
 use nitinol_runtime::{IdleTimeout, ProcessSystem, Props, SupervisionStrategy};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 
 use crate::durable_stream::{
     DurableSubscription, PolledBatch, ReadReport, SequenceCursor, SettledThrough,
@@ -26,20 +23,12 @@ use crate::durable_stream::{
 use crate::projection::ProjectionId;
 
 pub(crate) use self::declaration::{Declaration, ProjectorDeclaration};
-pub(crate) use self::observer::AppendNotifier;
+pub(crate) use self::observer::ActivatorObserver;
 pub(crate) use self::watcher::{WatcherSetting, WatcherSource};
 
 use self::declaration::{Interest, Running};
 use self::observer::Appended;
 use self::watcher::Seen;
-
-/// How many append notices may wait for the activator before further ones are
-/// dropped.
-///
-/// A dropped notice delays a wake-up and never loses an event: every projector
-/// reads from its own recorded position, so it projects what it missed the
-/// next time anything wakes it.
-const APPEND_NOTICE_CAPACITY: usize = 1024;
 
 /// The one process per system that holds every projection spawned on it, and
 /// starts each one's projector whenever there is something for it to project.
@@ -193,19 +182,17 @@ struct RetryActivation(ProjectionId);
 pub(crate) type Stopped = oneshot::Receiver<()>;
 
 impl ProjectionActivator {
-    /// Start a system's activator on `system`, and attach `notifier` to it so
-    /// that appends through the system's journal reach it.
+    /// Start a system's activator on `system`.
     ///
     /// Called from exactly one place: the memoised cell a system's node holds,
-    /// on the first projector spawn. It is persistent, because nothing would
-    /// wake it, and resumes on a handler's error, because every projector in
-    /// the system is its child.
+    /// on the first projector spawn. The system's journal reports its appends
+    /// to whatever that cell holds, so from then on they reach this activator.
+    /// It is persistent, because nothing would wake it, and resumes on a
+    /// handler's error, because every projector in the system is its child.
     pub(crate) async fn spawn(
         system: &ProcessSystem,
-        notifier: &AppendNotifier,
         watcher: Option<WatcherSource>,
     ) -> ProcessProxy<Self> {
-        let (notices, received) = mpsc::channel(APPEND_NOTICE_CAPACITY);
         let props = Props::new(move || ProjectionActivator {
             entries: HashMap::new(),
             by_type: HashMap::new(),
@@ -214,11 +201,8 @@ impl ProjectionActivator {
             watcher: watcher.clone(),
         })
         .with_supervision_strategy(SupervisionStrategy::Resume)
-        .with_idle_timeout(IdleTimeout::Persistent)
-        .with_driver(AppendedDriver { received });
-        let activator = system.spawn(props).await;
-        notifier.attach(notices);
-        activator
+        .with_idle_timeout(IdleTimeout::Persistent);
+        system.spawn(props).await
     }
 
     fn entry(&mut self, id: &ProjectionId) -> &mut Entry {
@@ -500,6 +484,21 @@ impl Receive<RetryActivation> for ProjectionActivator {
     }
 }
 
+impl Receive<Appended> for ProjectionActivator {
+    type Response = ();
+    type Error = Infallible;
+
+    async fn recv(
+        &mut self,
+        appended: Appended,
+        ctx: &mut ProcessContext<Self>,
+    ) -> Result<(), Infallible> {
+        self.on_appended(ctx, &appended.key, appended.head, &appended.types)
+            .await;
+        Ok(())
+    }
+}
+
 impl Receive<StartWatcher> for ProjectionActivator {
     type Response = ();
     type Error = Infallible;
@@ -567,36 +566,5 @@ impl Receive<PolledBatch<Seen>> for ProjectionActivator {
             );
         }
         Ok(SettledThrough(batch.last_observed))
-    }
-}
-
-/// Hands the activator each append its system's journal reports.
-struct AppendedDriver {
-    received: mpsc::Receiver<Appended>,
-}
-
-impl Driver<ProjectionActivator> for AppendedDriver {
-    type Event = Appended;
-
-    async fn next(&mut self) -> Option<Appended> {
-        match self.received.recv().await {
-            Some(appended) => Some(appended),
-            // Every journal that could report an append is gone, so there is
-            // nothing more to wait for here — but the activator still owns
-            // every projector and the watcher, so ending it would stop them.
-            None => std::future::pending().await,
-        }
-    }
-
-    async fn apply(
-        &mut self,
-        state: &mut ProjectionActivator,
-        ctx: &mut ProcessContext<ProjectionActivator>,
-        appended: Appended,
-    ) -> Result<(), HandlerError> {
-        state
-            .on_appended(ctx, &appended.key, appended.head, &appended.types)
-            .await;
-        Ok(())
     }
 }

@@ -1,11 +1,14 @@
 //! How an append through a system's journal reaches its projection activator.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
+use async_trait::async_trait;
 use nitinol_persistence::store::AppendObserver;
-use nitinol_persistence::{AppendOutcome, AppendingEvent, EventType};
-use tokio::sync::mpsc;
-use tokio::sync::mpsc::error::TrySendError;
+use nitinol_persistence::{AppendOutcome, EventType};
+use nitinol_runtime::process::ProcessProxy;
+use tokio::sync::OnceCell;
+
+use super::ProjectionActivator;
 
 /// What one accepted append tells the activator: where, how far, and of which
 /// types. No payload — a projector reads the events from the journal.
@@ -16,49 +19,59 @@ pub(crate) struct Appended {
     pub(crate) types: Vec<EventType>,
 }
 
-/// The observer a system's journal carries: it hands each accepted append to
-/// the system's activator, once one is running.
-///
-/// Before the first projector is spawned there is no activator, and an append
-/// is reported to nobody — nothing could be woken by it.
-#[derive(Default)]
-pub(crate) struct AppendNotifier {
-    activator: OnceLock<mpsc::Sender<Appended>>,
-}
-
-impl AppendNotifier {
-    /// Report every later append to the activator `notices` reaches.
-    pub(crate) fn attach(&self, notices: mpsc::Sender<Appended>) {
-        self.activator
-            .set(notices)
-            .expect("a node starts its activator once, so its notifier is attached once");
+impl Appended {
+    /// The notice an append to `key`, accepted as `outcome`, of events of
+    /// `types`, is told as; `None` for an append of no events, which moved no
+    /// position and so has nothing to wake.
+    fn of(key: &str, outcome: &AppendOutcome, types: &[EventType]) -> Option<Self> {
+        let &head = outcome.assigned_sequences.last()?;
+        Some(Self {
+            key: Arc::from(key),
+            head,
+            types: types.to_vec(),
+        })
     }
 }
 
-impl AppendObserver for AppendNotifier {
-    fn appended(&self, key: &str, events: &[AppendingEvent], outcome: &AppendOutcome) {
+/// The observer a system's journal carries: it tells each accepted append to
+/// the system's activator, once one is running.
+///
+/// It reads the very cell the system's node starts its activator in, and never
+/// starts one itself. Before the first projector is spawned there is no
+/// activator, and an append is reported to nobody — nothing could be woken by
+/// it.
+pub(crate) struct ActivatorObserver {
+    activator: Arc<OnceCell<ProcessProxy<ProjectionActivator>>>,
+}
+
+impl ActivatorObserver {
+    /// An observer telling appends to the activator `activator` holds once it
+    /// is started.
+    pub(crate) fn new(activator: Arc<OnceCell<ProcessProxy<ProjectionActivator>>>) -> Self {
+        Self { activator }
+    }
+}
+
+#[async_trait]
+impl AppendObserver for ActivatorObserver {
+    async fn appended(&self, key: &str, outcome: &AppendOutcome, types: &[EventType]) {
         let Some(activator) = self.activator.get() else {
             return;
         };
-        let Some(&head) = outcome.assigned_sequences.last() else {
+        let Some(appended) = Appended::of(key, outcome, types) else {
             return;
         };
-        let appended = Appended {
-            key: Arc::from(key),
-            head,
-            types: events.iter().map(|event| event.event_type).collect(),
-        };
-        match activator.try_send(appended) {
-            Ok(()) => {}
-            // The appender must not wait on the activator. A notice dropped
-            // here only delays a wake-up: every projector reads from its own
-            // recorded position, and the watcher reads the journal too.
-            Err(TrySendError::Full(dropped)) => tracing::debug!(
-                stream = %dropped.key,
-                head = dropped.head,
-                "projection activator: append notice dropped, its queue is full"
-            ),
-            Err(TrySendError::Closed(_)) => {}
+        let (stream, head) = (Arc::clone(&appended.key), appended.head);
+        // Every projector is the activator's child, so an activator that has
+        // stopped leaves no projector to wake. The append itself was accepted,
+        // so it is not failed for that.
+        if let Err(error) = activator.tell(appended).await {
+            tracing::debug!(
+                stream = %stream,
+                head,
+                error = %error,
+                "projection activator: append notice not delivered, the activator has stopped"
+            );
         }
     }
 }
@@ -67,65 +80,55 @@ impl AppendObserver for AppendNotifier {
 mod tests {
     use super::*;
 
-    use bytes::Bytes;
     use nitinol_persistence::{Family, TypeName};
 
     const FIRST: EventType = EventType::new(Family::new("observer.test"), TypeName::new("First"));
     const SECOND: EventType = EventType::new(Family::new("observer.test"), TypeName::new("Second"));
 
-    fn event(sequence: u64, event_type: EventType) -> AppendingEvent {
-        AppendingEvent {
-            sequence,
-            event_type,
-            payload: Bytes::from_static(b"payload"),
-            occurred_at: jiff::Timestamp::now(),
-        }
-    }
-
     fn outcome(assigned_sequences: Vec<u64>) -> AppendOutcome {
         AppendOutcome {
-            stream_version: 2,
+            stream_version: 3,
             assigned_sequences,
         }
     }
 
     #[test]
-    fn an_append_before_any_activator_is_reported_to_nobody() {
-        let notifier = AppendNotifier::default();
-        notifier.appended("stream", &[event(1, FIRST)], &outcome(vec![7]));
-        let (notices, mut received) = mpsc::channel(4);
-        notifier.attach(notices);
+    fn an_append_is_one_notice_naming_its_last_position_and_every_type() {
+        let appended = Appended::of(
+            "stream",
+            &outcome(vec![11, 12, 13]),
+            &[FIRST, SECOND, FIRST],
+        )
+        .expect("an append of events must be told");
 
-        assert!(
-            received.try_recv().is_err(),
-            "an append made before the activator was attached must not reach it"
+        assert_eq!(
+            (&*appended.key, appended.head, appended.types),
+            ("stream", 13, vec![FIRST, SECOND, FIRST]),
+            "the notice must name the stream, the append's last global position and the type \
+             of every event in it, in the order appended"
         );
     }
 
     #[test]
-    fn one_append_is_one_notice_naming_its_last_position_and_every_type() {
-        let notifier = AppendNotifier::default();
-        let (notices, mut received) = mpsc::channel(4);
-        notifier.attach(notices);
-
-        notifier.appended(
-            "stream",
-            &[event(1, FIRST), event(2, SECOND)],
-            &outcome(vec![11, 12]),
-        );
-
-        let appended = received
-            .try_recv()
-            .expect("an accepted append must reach the attached activator");
-        assert_eq!(
-            (&*appended.key, appended.head, appended.types),
-            ("stream", 12, vec![FIRST, SECOND]),
-            "the notice must name the stream, the append's last global position and the type \
-             of every event in it"
-        );
+    fn an_append_of_no_events_is_no_notice() {
         assert!(
-            received.try_recv().is_err(),
-            "an append of two events must be one notice, not one per event"
+            Appended::of("stream", &outcome(Vec::new()), &[]).is_none(),
+            "an append that was assigned no position has nothing to wake"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_append_before_any_activator_returns_without_starting_one() {
+        let activator = Arc::new(OnceCell::new());
+        let observer = ActivatorObserver::new(Arc::clone(&activator));
+
+        observer
+            .appended("stream", &outcome(vec![7]), &[FIRST])
+            .await;
+
+        assert!(
+            activator.get().is_none(),
+            "an append must not start the activator: only the first projector spawn does"
         );
     }
 }

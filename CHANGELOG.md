@@ -28,7 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   passivated projector is rebuilt from its producer and catches up from its
   offset.
 - (`nitinol-persistence`): `AppendObserver`, and `Journal::observed_by`, which
-  reports every append a journal accepts to an observer.
+  reports every append a journal accepts to an observer. The observer is
+  async and awaited inside the `append` call; it is told the stream `key`, the
+  `AppendOutcome` the backend assigned, and the event `types` in the order
+  appended — not the events, so an observed append does not copy its batch.
 - (`nitinol-runtime`): `ProcessState` and `ProcessProxy::state`, which reads
   whether a process is `Starting`, `Running`, `Stopping` or `Stopped`.
 - (`nitinol-runtime`): `ProcessWaker`, `Driver::attach_waker` and

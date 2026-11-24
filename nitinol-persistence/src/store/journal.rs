@@ -4,7 +4,9 @@
 use std::fmt;
 use std::sync::Arc;
 
-use nitinol_contract::Event;
+use async_trait::async_trait;
+use nitinol_contract::{Event, EventType};
+use smallvec::SmallVec;
 
 use crate::error::{AppendError, LoadError};
 use crate::event::AppendingEvent;
@@ -53,15 +55,26 @@ pub struct Journal {
 ///
 /// [`appended`](AppendObserver::appended) is called once per accepted append,
 /// after the backend answered `Ok` and before the journal returns that answer,
-/// with the key and events the append was made with and the outcome the
-/// backend assigned. A refused append is never reported, so whatever an
-/// observer is told about is already in the journal for a reader to load. It
-/// runs on the appender's task, inside its `append` call, so an observer must
-/// not block: hand the fact on and return.
+/// with the key the append was made with, the outcome the backend assigned,
+/// and the type of each appended event. A refused append is never reported, so
+/// whatever an observer is told about is already in the journal for a reader to
+/// load.
+///
+/// It is awaited on the appender's task, inside its `append` call: the
+/// appender waits until the observer returns. So an observer does no I/O and
+/// returns promptly — it hands the fact on and returns.
+#[async_trait]
 pub trait AppendObserver: Send + Sync {
-    /// The append of `events` to the stream `key` was accepted as `outcome`.
-    fn appended(&self, key: &str, events: &[AppendingEvent], outcome: &AppendOutcome);
+    /// The append to the stream `key` was accepted as `outcome`; `types` is
+    /// the type of each of its events, in the order appended, repeats kept.
+    async fn appended(&self, key: &str, outcome: &AppendOutcome, types: &[EventType]);
 }
+
+/// How many event types an observed append reports without allocating.
+///
+/// An aggregate's command usually emits a handful of events, so a batch larger
+/// than this is the exception and pays one allocation for it.
+const REPORTED_TYPES_INLINE: usize = 8;
 
 impl Journal {
     /// This journal, with every append it accepts reported to `observer`.
@@ -83,7 +96,7 @@ impl Journal {
     /// [`EventStore::append`]'s clauses, unchanged: this hands the call to the
     /// registered store and its answer back. If the journal is
     /// [observed](Journal::observed_by), an accepted append is reported to the
-    /// observer before its answer is returned.
+    /// observer, and the observer awaited, before its answer is returned.
     ///
     /// # Errors
     ///
@@ -100,11 +113,12 @@ impl Journal {
         let Some(observer) = &self.observer else {
             return self.store.append(key, events).await;
         };
-        // The backend takes the batch by value, so what the observer is told
-        // about has to be kept back before it is handed over.
-        let reported = events.clone();
+        // The backend takes the batch by value, so the types the observer is
+        // told about are taken before it is handed over.
+        let types: SmallVec<[EventType; REPORTED_TYPES_INLINE]> =
+            events.iter().map(|event| event.event_type).collect();
         let outcome = self.store.append(key, events).await?;
-        observer.appended(key, &reported, &outcome);
+        observer.appended(key, &outcome, &types).await;
         Ok(outcome)
     }
 
