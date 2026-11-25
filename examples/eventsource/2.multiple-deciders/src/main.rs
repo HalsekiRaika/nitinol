@@ -33,7 +33,8 @@ async fn main() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
 
     let proxy = system
         .spawn_aggregate::<Wallet>(AggregateId::new("wallet-1"))

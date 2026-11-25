@@ -256,7 +256,8 @@ async fn each_record_reaches_handle_on_the_instance_correlate_names() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
 
     // One journal: the order stream the saga observes and both instances' own
     // streams are tenants of the store the system distributes.
@@ -298,7 +299,8 @@ async fn a_record_that_names_no_instance_is_silent_and_writes_nothing() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
 
     // One journal: the order stream the saga observes and both instances' own
     // streams are tenants of the store the system distributes.

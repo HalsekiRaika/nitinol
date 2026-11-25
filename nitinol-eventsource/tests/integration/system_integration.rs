@@ -1,7 +1,7 @@
 // Integration tests for EventSourceSystem.
 //
 // Tests verify:
-// - Builder pattern: EventSourceSystem::builder(ps).with_persistence(..).build()
+// - Builder pattern: EventSourceSystem::builder(ps).with_persistence(..).build().await
 // - spawn_aggregate creates a working AggregateProxy
 // - A second spawn_aggregate with the same id addresses the aggregate the first
 //   call resolved, rather than a second activation of it
@@ -193,7 +193,7 @@ async fn wait_for_count(counter: &Arc<AtomicUsize>, notify: &Arc<Notify>, expect
 
 // Test: EventSourceSystem builder creates a system
 
-/// EventSourceSystem::builder(ps).with_persistence(..).build() compiles and
+/// EventSourceSystem::builder(ps).with_persistence(..).build().await compiles and
 /// produces an EventSourceSystem that exposes process_system().
 #[tokio::test]
 async fn event_source_system_builder_produces_system() {
@@ -207,7 +207,8 @@ async fn event_source_system_builder_produces_system() {
                 .eventstore(InMemoryEventStore::default())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
 
     // Then: process_system() is accessible (type-level proof)
     let _ = system.process_system();
@@ -229,7 +230,8 @@ async fn spawn_aggregate_creates_working_aggregate_proxy() {
     let store = persistence.event_store();
     let system = EventSourceSystem::builder(ps)
         .with_persistence(persistence)
-        .build();
+        .build()
+        .await;
     let id = AggregateId::new("sys-spawn-basic");
 
     // When
@@ -272,7 +274,8 @@ async fn spawn_aggregate_second_call_addresses_the_same_aggregate() {
     let store = persistence.event_store();
     let system = EventSourceSystem::builder(ps)
         .with_persistence(persistence)
-        .build();
+        .build()
+        .await;
     let id = AggregateId::new("sys-replay-state");
 
     let proxy1 = system.spawn_aggregate::<Counter>(id.clone()).await;
@@ -324,7 +327,8 @@ async fn spawn_aggregate_sequential_increments_accumulate_state() {
                 .eventstore(InMemoryEventStore::default())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let proxy = system
         .spawn_aggregate::<Counter>(AggregateId::new("sys-seq"))
         .await;
@@ -359,7 +363,8 @@ async fn projector_props_decode_through_the_codec_each_event_names() {
     let event_store = persistence.event_store();
     let system = EventSourceSystem::builder(ps)
         .with_persistence(persistence)
-        .build();
+        .build()
+        .await;
 
     let agg_id = AggregateId::new("sys-proj-agg");
 
@@ -420,7 +425,8 @@ async fn snapshot_roundtrip_via_event_source_system() {
                 .snapshot(InMemorySnapshotStore::default())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
 
     let snapshot_ref = system.snapshot_persistor().await;
     let id = AggregateId::new("sys-snap-restore");

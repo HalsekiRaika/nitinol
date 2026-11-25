@@ -703,6 +703,7 @@ async fn system_over_offsets<E: EventStore + 'static>(
                 .build(),
         ))
         .build()
+        .await
 }
 
 /// A system over a plain in-memory journal.

@@ -85,13 +85,14 @@
 //!     And the store recovers, and a second event is appended
 //!     Then each event has been handled exactly once
 //!
-//!   Scenario: history from before the activator started does not wake a
+//!   Scenario: history from before the watcher started does not wake a
 //!             projector whose position already covers it
-//!     Given a journal written before the activator started, and a recorded
-//!           projector position covering its records
+//!     Given a journal written before the first projector was spawned, and a
+//!           recorded projector position covering its records
 //!     When the projector is spawned, passivates, and the watcher has had turns
 //!     Then the projector is not activated again — the watcher reads from the
-//!          journal's head as the activator started, not from its beginning
+//!          journal's head as the first projector was spawned, not from its
+//!          beginning
 //!
 //!   Scenario: a poller restarted by its supervision starts no second projector
 //!     Given a projector whose poller's first read panics
@@ -120,10 +121,32 @@
 //!     Then the activator activates the projector again and it starts
 //!
 //!   Scenario: a watcher whose head could not be read passes over no write
-//!     Given a journal whose head cannot be read as the activator starts
+//!     Given a journal whose head cannot be read as the first projector is
+//!           spawned
 //!     When a write no notification announced is made after the projector
 //!          passivated
 //!     Then the watcher picks it up and the projector projects it
+//!
+//!   Scenario: the watcher reads nothing until the first projector is spawned
+//!     Given a system with a short watcher interval and no projector
+//!     When several watcher intervals pass
+//!     Then the journal has not been read
+//!     When a projector following one stream is spawned on the same system
+//!     Then the watcher reads the journal
+//!
+//!   Scenario: one watcher serves every projection
+//!     Given a system whose watcher started with its first projector
+//!     When a second projection is spawned
+//!     Then the journal is read once a watcher interval, not once per
+//!          projection
+//!
+//!   Scenario: an append before any projector is spawned reaches the activator
+//!     Given a system just built, with no projector spawned and no watcher
+//!     When its aggregate appends an event
+//!     Then the append is accepted
+//!     When a projector following that stream is spawned
+//!     Then it catches up from its own offset, and a later append wakes it
+//!          after it passivates
 //!
 //!   Scenario: a stream projector weighs what it is owed in its stream's units
 //!     Given a projector following one stream, written interleaved with another
@@ -583,6 +606,49 @@ impl EventStore for HeadlessAtFirst {
 
 type HeadlessAtFirstStore = CustomStore<Unprovided, InMemoryOffsetStore, Unprovided>;
 
+// Fixtures: a journal that counts its reads of every stream
+
+/// An in-memory journal that counts the loads asking for every stream, and
+/// leaves everything else to the journal it wraps.
+///
+/// A projector following one stream loads that stream alone, so where no
+/// projector follows every stream, a load of every stream is the watcher's.
+#[derive(Clone, Default)]
+struct CountedJournal {
+    inner: InMemoryEventStore,
+    whole_journal_loads: Arc<AtomicUsize>,
+}
+
+impl CountedJournal {
+    fn whole_journal_loads(&self) -> usize {
+        self.whole_journal_loads.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl EventStore for CountedJournal {
+    async fn append(
+        &self,
+        key: &str,
+        events: Vec<AppendingEvent>,
+    ) -> Result<AppendOutcome, AppendError> {
+        self.inner.append(key, events).await
+    }
+
+    async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
+        if query.stream_key.is_none() {
+            self.whole_journal_loads.fetch_add(1, Ordering::SeqCst);
+        }
+        self.inner.load(query).await
+    }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
+    }
+}
+
+type CountedJournalStore = CustomStore<Unprovided, InMemoryOffsetStore, Unprovided>;
+
 // Helpers: systems
 
 /// Whether and how often the system's watcher runs.
@@ -603,17 +669,25 @@ async fn with_default_idle() -> ProcessSystem {
         .await
 }
 
-fn system_on(process_system: ProcessSystem, watcher: Watcher) -> EventSourceSystem<InMemoryStore> {
+async fn system_on(
+    process_system: ProcessSystem,
+    watcher: Watcher,
+) -> EventSourceSystem<InMemoryStore> {
     let builder = EventSourceSystem::builder(process_system)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()));
     match watcher {
-        Watcher::Disabled => builder.without_projection_watcher().build(),
-        Watcher::Every(interval) => builder.with_projection_watcher_interval(interval).build(),
-        Watcher::Default => builder.build(),
+        Watcher::Disabled => builder.without_projection_watcher().build().await,
+        Watcher::Every(interval) => {
+            builder
+                .with_projection_watcher_interval(interval)
+                .build()
+                .await
+        }
+        Watcher::Default => builder.build().await,
     }
 }
 
-fn flaky_system(
+async fn flaky_system(
     process_system: ProcessSystem,
     offsets: &FlakyOffsets,
 ) -> EventSourceSystem<FlakyStore> {
@@ -626,9 +700,10 @@ fn flaky_system(
         ))
         .without_projection_watcher()
         .build()
+        .await
 }
 
-fn flaky_journal_system(
+async fn flaky_journal_system(
     process_system: ProcessSystem,
     journal: &FlakyJournal,
 ) -> EventSourceSystem<FlakyJournalStore> {
@@ -641,9 +716,10 @@ fn flaky_journal_system(
         ))
         .without_projection_watcher()
         .build()
+        .await
 }
 
-fn panicky_journal_system(
+async fn panicky_journal_system(
     process_system: ProcessSystem,
     journal: &PanickyJournal,
 ) -> EventSourceSystem<PanickyJournalStore> {
@@ -656,6 +732,24 @@ fn panicky_journal_system(
         ))
         .without_projection_watcher()
         .build()
+        .await
+}
+
+/// A system whose watcher runs every [`WATCHER_INTERVAL`] over `journal`.
+async fn counted_journal_system(
+    process_system: ProcessSystem,
+    journal: &CountedJournal,
+) -> EventSourceSystem<CountedJournalStore> {
+    EventSourceSystem::builder(process_system)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(journal.clone())
+                .projection_offsets(InMemoryOffsetStore::default())
+                .build(),
+        ))
+        .with_projection_watcher_interval(WATCHER_INTERVAL)
+        .build()
+        .await
 }
 
 // Helpers: appends and positions
@@ -757,7 +851,7 @@ where
 #[tokio::test(start_paused = true)]
 async fn an_idle_projector_stops_and_the_systems_aggregate_append_wakes_it() {
     // Given: a projector that has caught up with the aggregate's first event
-    let system = system_on(without_default_idle().await, Watcher::Disabled);
+    let system = system_on(without_default_idle().await, Watcher::Disabled).await;
     let id = ProjectionId::new("projection-activator-wake");
     let stream = AggregateId::new("projection-activator-wake");
     let projection = Projection::default();
@@ -824,7 +918,7 @@ async fn an_idle_projector_stops_and_the_systems_aggregate_append_wakes_it() {
 #[tokio::test(start_paused = true)]
 async fn a_running_projector_projects_an_append_without_waiting_out_its_poll_interval() {
     // Given: a projector polling every 10 s that has caught up
-    let system = system_on(without_default_idle().await, Watcher::Disabled);
+    let system = system_on(without_default_idle().await, Watcher::Disabled).await;
     let stream = AggregateId::new("projection-activator-nudge");
     let aggregate = system.spawn_aggregate::<Tally>(stream.clone()).await;
     aggregate
@@ -876,7 +970,8 @@ async fn an_event_type_a_global_projector_does_not_handle_leaves_it_stopped() {
     let system = system_on(
         without_default_idle().await,
         Watcher::Every(WATCHER_INTERVAL),
-    );
+    )
+    .await;
     let journal = system.event_store();
     let projection = Projection::default();
     let handle = ProjectorProps::new(
@@ -938,7 +1033,8 @@ async fn an_event_in_another_stream_leaves_a_stream_projector_stopped() {
     let system = system_on(
         without_default_idle().await,
         Watcher::Every(WATCHER_INTERVAL),
-    );
+    )
+    .await;
     let journal = system.event_store();
     let stream = AggregateId::new("projection-activator-unrelated-stream");
     let projection = Projection::default();
@@ -998,7 +1094,8 @@ async fn a_write_no_notification_announced_wakes_the_projector_after_the_watcher
     let system = system_on(
         without_default_idle().await,
         Watcher::Every(WATCHER_INTERVAL),
-    );
+    )
+    .await;
     let stream = AggregateId::new("projection-activator-watcher");
     let projection = Projection::default();
     let handle = ProjectorProps::new(
@@ -1058,7 +1155,7 @@ async fn a_write_no_notification_announced_wakes_the_projector_after_the_watcher
 #[tokio::test(start_paused = true)]
 async fn an_event_learned_of_before_the_idle_stop_activates_the_projector_again_at_once() {
     // Given: a projector polling every 10 s that has settled the first event
-    let system = system_on(without_default_idle().await, Watcher::Disabled);
+    let system = system_on(without_default_idle().await, Watcher::Disabled).await;
     let journal = system.event_store();
     let id = ProjectionId::new("projection-activator-stop-race");
     let stream = AggregateId::new("projection-activator-stop-race");
@@ -1127,7 +1224,7 @@ async fn an_event_learned_of_before_the_idle_stop_activates_the_projector_again_
 #[tokio::test(start_paused = true)]
 async fn a_projector_naming_no_idle_timeout_stops_on_the_system_default_and_is_woken() {
     // Given: a projector from the system's props that names no idle timeout
-    let system = system_on(with_default_idle().await, Watcher::Disabled);
+    let system = system_on(with_default_idle().await, Watcher::Disabled).await;
     let stream = AggregateId::new("projection-activator-inherit");
     let aggregate = system
         .aggregate_props::<Tally>(stream.clone())
@@ -1185,7 +1282,7 @@ async fn a_projector_naming_no_idle_timeout_stops_on_the_system_default_and_is_w
 #[tokio::test(start_paused = true)]
 async fn a_second_spawn_of_a_running_projection_starts_no_second_projector() {
     // Given: a running projector
-    let system = system_on(without_default_idle().await, Watcher::Disabled);
+    let system = system_on(without_default_idle().await, Watcher::Disabled).await;
     let id = ProjectionId::new("projection-activator-join");
     let stream = AggregateId::new("projection-activator-join");
     let first = Projection::default();
@@ -1237,7 +1334,7 @@ async fn a_second_spawn_of_a_running_projection_starts_no_second_projector() {
 #[tokio::test(start_paused = true)]
 async fn a_second_spawn_leaves_the_first_declaration_to_later_activations() {
     // Given: a projector that passivates, and a second spawn of its id
-    let system = system_on(without_default_idle().await, Watcher::Disabled);
+    let system = system_on(without_default_idle().await, Watcher::Disabled).await;
     let id = ProjectionId::new("projection-activator-join-declaration");
     let stream = AggregateId::new("projection-activator-join-declaration");
     let first = Projection::default();
@@ -1290,7 +1387,8 @@ async fn a_projector_stopped_through_its_handle_is_not_activated_by_later_append
     let system = system_on(
         without_default_idle().await,
         Watcher::Every(WATCHER_INTERVAL),
-    );
+    )
+    .await;
     let journal = system.event_store();
     let id = ProjectionId::new("projection-activator-stop");
     let stream = AggregateId::new("projection-activator-stop");
@@ -1340,7 +1438,7 @@ async fn a_projector_stopped_through_its_handle_is_not_activated_by_later_append
 #[tokio::test(start_paused = true)]
 async fn a_system_without_the_watcher_leaves_an_unannounced_write_unread() {
     // Given: a passivated projector on a system with the watcher disabled
-    let system = system_on(without_default_idle().await, Watcher::Disabled);
+    let system = system_on(without_default_idle().await, Watcher::Disabled).await;
     let stream = AggregateId::new("projection-activator-watcher-disabled");
     let projection = Projection::default();
     let handle = ProjectorProps::new(
@@ -1394,12 +1492,12 @@ async fn a_system_without_the_watcher_leaves_an_unannounced_write_unread() {
     );
 }
 
-/// The default interval is measured from the moment the activator starts — the
-/// first spawn — since that is the earliest any watcher could read.
+/// The default interval is measured from the moment the watcher starts — the
+/// first spawn — since that is the earliest it could read.
 #[tokio::test(start_paused = true)]
 async fn the_default_watcher_waits_an_order_of_magnitude_longer_than_a_projector_poll() {
     // Given: a passivated projector on a system left at the default watcher
-    let system = system_on(without_default_idle().await, Watcher::Default);
+    let system = system_on(without_default_idle().await, Watcher::Default).await;
     let stream = AggregateId::new("projection-activator-watcher-default");
     let projection = Projection::default();
     let started_at = Instant::now();
@@ -1445,13 +1543,13 @@ async fn the_default_watcher_waits_an_order_of_magnitude_longer_than_a_projector
     let order_of_magnitude = DEFAULT_POLL_INTERVAL * 10;
     assert!(
         picked_up_after >= order_of_magnitude,
-        "the default watcher picked the write up {picked_up_after:?} after the activator \
+        "the default watcher picked the write up {picked_up_after:?} after the watcher \
          started; its interval must be at least {order_of_magnitude:?}, an order of \
          magnitude above a projector's {DEFAULT_POLL_INTERVAL:?} poll"
     );
 }
 
-// Scenario: history from before the activator started does not wake a
+// Scenario: history from before the watcher started does not wake a
 // projector whose position already covers it
 
 /// The journal and the projector's recorded position are an earlier run's: its
@@ -1460,18 +1558,20 @@ async fn the_default_watcher_waits_an_order_of_magnitude_longer_than_a_projector
 /// read from the journal's beginning would report both records again, and
 /// nothing this run settled would weigh against them, so the projector would be
 /// woken for them — once, or over and over each time it passivated again having
-/// read nothing. The watcher reads from the journal's head as the activator
-/// started; what lies before it is the first activation's catch-up to read.
+/// read nothing. The watcher reads from the journal's head as the first
+/// projector was spawned; what lies before it is the first activation's
+/// catch-up to read.
 ///
 /// The watcher is shown to be running all along by a write it alone can learn
-/// of, appended after the activator started: that one wakes the projector.
+/// of, appended after the watcher started: that one wakes the projector.
 #[tokio::test(start_paused = true)]
 async fn history_from_before_the_activator_started_does_not_wake_a_projector_it_covers() {
     // Given: a journal and a recorded position from an earlier run
     let system = system_on(
         without_default_idle().await,
         Watcher::Every(WATCHER_INTERVAL),
-    );
+    )
+    .await;
     let earlier_run = system.persistence().event_store();
     let id = ProjectionId::new("projection-activator-restart");
     let followed = AggregateId::new("projection-activator-restart");
@@ -1488,8 +1588,8 @@ async fn history_from_before_the_activator_started_does_not_wake_a_projector_it_
         .await
         .expect("recording the earlier run's position must succeed");
 
-    // When: the projector is spawned — starting the activator and its watcher —
-    // and the watcher has had reads since
+    // When: the projector is spawned — starting the watcher — and the watcher
+    // has had reads since
     let projection = Projection::default();
     let handle = ProjectorProps::new(id.clone(), projection.producer())
         .with_event::<Watched>()
@@ -1508,7 +1608,7 @@ async fn history_from_before_the_activator_started_does_not_wake_a_projector_it_
     assert_eq!(
         (projection.activations(), projection.applied()),
         (1, 0),
-        "records from before the activator started, which the projector's recorded \
+        "records from before the watcher started, which the projector's recorded \
          position already covers, must not activate it again — (activations, applied)"
     );
 
@@ -1519,13 +1619,13 @@ async fn history_from_before_the_activator_started_does_not_wake_a_projector_it_
     projection
         .counted(
             1,
-            "the watcher must learn of a write appended after the activator started",
+            "the watcher must learn of a write appended after it started",
         )
         .await;
     assert_eq!(
         projection.activations(),
         2,
-        "the write after the activator started must be projected by a second activation"
+        "the write after the watcher started must be projected by a second activation"
     );
 }
 
@@ -1539,7 +1639,7 @@ async fn history_from_before_the_activator_started_does_not_wake_a_projector_it_
 async fn an_activation_that_fails_is_tried_again_without_another_append() {
     // Given: a passivated projector, and an offset store that refuses loads
     let offsets = FlakyOffsets::default();
-    let system = flaky_system(without_default_idle().await, &offsets);
+    let system = flaky_system(without_default_idle().await, &offsets).await;
     let journal = system.event_store();
     let id = ProjectionId::new("projection-activator-retry");
     let stream = AggregateId::new("projection-activator-retry");
@@ -1614,7 +1714,7 @@ async fn an_activation_that_fails_is_tried_again_without_another_append() {
 #[tokio::test(start_paused = true)]
 async fn an_event_the_first_read_could_not_settle_is_read_again_after_an_idle_stop() {
     // Given: an event in the journal, and a projector that refuses it once
-    let system = system_on(without_default_idle().await, Watcher::Disabled);
+    let system = system_on(without_default_idle().await, Watcher::Disabled).await;
     let journal = system.event_store();
     let id = ProjectionId::new("projection-activator-first-read");
     let stream = AggregateId::new("projection-activator-first-read");
@@ -1665,7 +1765,7 @@ async fn an_event_the_first_read_could_not_settle_is_read_again_after_an_idle_st
 async fn a_first_read_that_fails_is_read_again_after_an_idle_stop() {
     // Given: an event in the journal, and a journal that refuses reads
     let journal_store = FlakyJournal::default();
-    let system = flaky_journal_system(without_default_idle().await, &journal_store);
+    let system = flaky_journal_system(without_default_idle().await, &journal_store).await;
     let journal = system.event_store();
     let id = ProjectionId::new("projection-activator-failed-first-read");
     let stream = AggregateId::new("projection-activator-failed-first-read");
@@ -1734,7 +1834,7 @@ async fn an_at_most_once_offset_save_that_failed_does_not_repeat_an_event() {
     // store whose saves fail
     let offsets = FlakyOffsets::default();
     offsets.fail_saves(true);
-    let system = flaky_system(without_default_idle().await, &offsets);
+    let system = flaky_system(without_default_idle().await, &offsets).await;
     let journal = system.event_store();
     let id = ProjectionId::new("projection-activator-at-most-once-save");
     let stream = AggregateId::new("projection-activator-at-most-once-save");
@@ -1800,7 +1900,7 @@ async fn an_at_most_once_offset_save_that_failed_does_not_repeat_an_event() {
 async fn a_poller_restarted_by_its_supervision_starts_no_second_projector() {
     // Given: an event in the journal, and a journal whose next read panics
     let journal_store = PanickyJournal::default();
-    let system = panicky_journal_system(without_default_idle().await, &journal_store);
+    let system = panicky_journal_system(without_default_idle().await, &journal_store).await;
     let journal = system.event_store();
     let id = ProjectionId::new("projection-activator-poller-restart");
     let stream = AggregateId::new("projection-activator-poller-restart");
@@ -1859,7 +1959,7 @@ async fn a_poller_restarted_by_its_supervision_starts_no_second_projector() {
 #[tokio::test(start_paused = true)]
 async fn a_stream_projector_weighs_what_it_is_owed_in_its_streams_units() {
     // Given: a projector following one stream, written interleaved with another
-    let system = system_on(without_default_idle().await, Watcher::Disabled);
+    let system = system_on(without_default_idle().await, Watcher::Disabled).await;
     let journal = system.event_store();
     let id = ProjectionId::new("projection-activator-stream-units");
     let followed = AggregateId::new("projection-activator-stream-units");
@@ -1942,7 +2042,7 @@ async fn a_read_that_failed_does_not_hold_back_the_next_appends_wake() {
     // Given: a running projector polling every 10 s that has caught up with an
     // empty journal
     let journal_store = FlakyJournal::default();
-    let system = flaky_journal_system(without_default_idle().await, &journal_store);
+    let system = flaky_journal_system(without_default_idle().await, &journal_store).await;
     let journal = system.event_store();
     let stream = AggregateId::new("projection-activator-failed-wake");
     let projection = Projection::default();
@@ -1998,7 +2098,8 @@ async fn a_re_registered_projections_restored_offset_is_not_owed_again() {
     let system = system_on(
         without_default_idle().await,
         Watcher::Every(WATCHER_INTERVAL),
-    );
+    )
+    .await;
     let journal = system.event_store();
     let id = ProjectionId::new("projection-activator-re-registered");
     let stream = AggregateId::new("projection-activator-re-registered");
@@ -2060,7 +2161,7 @@ async fn a_re_registered_projections_restored_offset_is_not_owed_again() {
 async fn an_offset_that_could_not_be_loaded_is_loaded_again_though_the_journal_is_empty() {
     // Given: an empty journal, and an offset store that refuses loads
     let offsets = FlakyOffsets::default();
-    let system = flaky_system(without_default_idle().await, &offsets);
+    let system = flaky_system(without_default_idle().await, &offsets).await;
     offsets.fail_loads(true);
     let projection = Projection::default();
 
@@ -2102,13 +2203,13 @@ async fn an_offset_that_could_not_be_loaded_is_loaded_again_though_the_journal_i
 
 // Scenario: a watcher whose head could not be read passes over no write
 
-/// The head is refused as the activator starts, and the projector passivates
+/// The head is refused as the watcher starts, and the projector passivates
 /// after its first catch-up. A write the system's journal is not told of is
 /// made before the watcher's interval has passed; a watcher that started at the
 /// head it read an interval later would start past it.
 #[tokio::test(start_paused = true)]
 async fn a_watcher_whose_head_could_not_be_read_passes_over_no_write() {
-    // Given: a journal whose head is refused as the activator starts
+    // Given: a journal whose head is refused as the watcher starts
     let journal_store = HeadlessAtFirst::default();
     let system = EventSourceSystem::builder(without_default_idle().await)
         .with_persistence(PersistenceProvider::<HeadlessAtFirstStore>::new(
@@ -2118,7 +2219,8 @@ async fn a_watcher_whose_head_could_not_be_read_passes_over_no_write() {
                 .build(),
         ))
         .with_projection_watcher_interval(WATCHER_INTERVAL)
-        .build();
+        .build()
+        .await;
     let stream = AggregateId::new("projection-activator-headless");
     let projection = Projection::default();
     let handle = ProjectorProps::new(
@@ -2160,4 +2262,188 @@ async fn a_watcher_whose_head_could_not_be_read_passes_over_no_write() {
             "the watcher must pick up the write made after the head was refused",
         )
         .await;
+}
+
+// Scenario: the watcher reads nothing until the first projector is spawned
+
+/// The activator runs from the moment the system is built, but the watcher is
+/// started by the first projection registered with it, so a system with no
+/// projector reads nothing from its journal however many watcher intervals
+/// pass. The projector follows one stream and reads that stream alone, so a
+/// read of every stream is the watcher's.
+#[tokio::test(start_paused = true)]
+async fn a_system_with_no_projector_has_its_watcher_read_nothing_until_the_first_spawn() {
+    // Given: a system with a short watcher interval and no projector
+    let journal_store = CountedJournal::default();
+    let system = counted_journal_system(without_default_idle().await, &journal_store).await;
+
+    // When: several watcher intervals pass
+    tokio::time::sleep(WATCHER_INTERVAL * 4).await;
+
+    // Then
+    assert_eq!(
+        journal_store.whole_journal_loads(),
+        0,
+        "a system with no projector spawned must not have its watcher read the journal"
+    );
+
+    // When: a projector following one stream is spawned on the same system
+    let projection = Projection::default();
+    let _handle = ProjectorProps::new(
+        ProjectionId::new("projection-activator-watcher-on-first-spawn"),
+        projection.producer(),
+    )
+    .with_event::<Watched>()
+    .catchup_from_aggregate(AggregateId::new(
+        "projection-activator-watcher-on-first-spawn",
+    ))
+    .spawn(&system)
+    .await;
+
+    // Then
+    let journal_store_ref = &journal_store;
+    until(
+        "the watcher reading the journal once the first projector is spawned",
+        move || async move { journal_store_ref.whole_journal_loads() >= 1 },
+    )
+    .await;
+}
+
+// Scenario: one watcher serves every projection
+
+/// The watcher is started once, by the first registration; a second
+/// projection registered on the same system starts no second watcher beside
+/// it. Nothing is appended, so each of the watcher's reads finds nothing and
+/// it reads once an interval. Both projectors follow one stream each, so a
+/// read of every stream is a watcher's.
+#[tokio::test(start_paused = true)]
+async fn a_second_projection_starts_no_second_watcher() {
+    const INTERVALS: usize = 10;
+
+    // Given: a system whose watcher started with its first projector
+    let journal_store = CountedJournal::default();
+    let system = counted_journal_system(without_default_idle().await, &journal_store).await;
+    let first = Projection::default();
+    let _first_handle = ProjectorProps::new(
+        ProjectionId::new("projection-activator-one-watcher-first"),
+        first.producer(),
+    )
+    .with_event::<Watched>()
+    .catchup_from_aggregate(AggregateId::new("projection-activator-one-watcher-first"))
+    .spawn(&system)
+    .await;
+    let journal_store_ref = &journal_store;
+    until(
+        "the watcher reading the journal once the first projector is spawned",
+        move || async move { journal_store_ref.whole_journal_loads() >= 1 },
+    )
+    .await;
+
+    // When: a second projection is spawned, and watcher intervals pass
+    let second = Projection::default();
+    let _second_handle = ProjectorProps::new(
+        ProjectionId::new("projection-activator-one-watcher-second"),
+        second.producer(),
+    )
+    .with_event::<Watched>()
+    .catchup_from_aggregate(AggregateId::new("projection-activator-one-watcher-second"))
+    .spawn(&system)
+    .await;
+    let before = journal_store.whole_journal_loads();
+    tokio::time::sleep(WATCHER_INTERVAL * INTERVALS as u32).await;
+    let read = journal_store.whole_journal_loads() - before;
+
+    // Then
+    assert!(
+        read >= INTERVALS / 2,
+        "over {INTERVALS} watcher intervals the journal was read {read} time(s); the watcher \
+         the first projector started must still be reading it"
+    );
+    assert!(
+        read <= INTERVALS + 1,
+        "over {INTERVALS} watcher intervals after a second projection was spawned the \
+         journal was read {read} time(s); one watcher reads it once an interval, so a \
+         second registration must not have started a watcher of its own"
+    );
+}
+
+// Scenario: an append before any projector is spawned reaches the activator
+
+/// The activator is started as the system is built, so the system's journal
+/// tells it of the aggregate's first append though no projection is
+/// registered yet; that append matches nothing and wakes nothing. The watcher
+/// is disabled, so the projector spawned afterwards can only have read that
+/// event by catching up from its own offset, and what wakes it once it has
+/// passivated is the later append's notification reaching the activator it
+/// was registered with.
+#[tokio::test(start_paused = true)]
+async fn an_append_before_any_projector_is_spawned_is_accepted_and_caught_up_by_the_later_one() {
+    // Given: a system just built, with no projector spawned and no watcher
+    let system = system_on(without_default_idle().await, Watcher::Disabled).await;
+    let id = ProjectionId::new("projection-activator-before-any-projector");
+    let stream = AggregateId::new("projection-activator-before-any-projector");
+    let aggregate = system.spawn_aggregate::<Tally>(stream.clone()).await;
+
+    // When: its aggregate appends an event
+    aggregate.ask(Record).await.expect(
+        "an append through the system's journal must be accepted before any projector is \
+         spawned",
+    );
+    tokio::time::sleep(QUIET).await;
+
+    // And: a projector following that stream is spawned
+    let projection = Projection::default();
+    let handle = ProjectorProps::new(id.clone(), projection.producer())
+        .with_idle_timeout(IdleTimeout::After(IDLE))
+        .with_event::<Watched>()
+        .catchup_from_aggregate(stream.clone())
+        .spawn(&system)
+        .await;
+
+    // Then: it catches up from its own offset, in its first activation
+    projection
+        .counted(
+            1,
+            "the projector spawned after the append must catch up with it",
+        )
+        .await;
+    assert_eq!(
+        projection.activations(),
+        1,
+        "the append made before any projection was registered must have activated nothing; \
+         the one activation is the spawn's"
+    );
+    let (system_ref, scope) = (&system, &OffsetScope::from(&id));
+    until(
+        "the projector settling the event appended before it was spawned",
+        move || async move { recorded(system_ref, scope).await == Some(1) },
+    )
+    .await;
+
+    // When: it passivates, and the aggregate appends again
+    tokio::time::sleep(QUIET).await;
+    let handle_ref = &handle;
+    until(
+        "the projector stopping on its idle timeout",
+        move || async move { !handle_ref.is_active().await },
+    )
+    .await;
+    aggregate
+        .ask(Record)
+        .await
+        .expect("the aggregate must persist its second event");
+
+    // Then
+    projection
+        .counted(
+            2,
+            "the append notification must reach the activator the projector was registered \
+             with and wake it",
+        )
+        .await;
+    assert_eq!(
+        projection.activations(),
+        2,
+        "the second event must be projected by a second activation"
+    );
 }

@@ -203,7 +203,8 @@ async fn a_refused_told_command_is_reported_and_a_carried_out_one_is_not() {
         .with_persistence(PersistenceProvider::new(Journal::from(
             InMemoryEventStore::default(),
         )))
-        .build();
+        .build()
+        .await;
     let id = AggregateId::new("tell-refusal-reported");
     let proxy = AggregateProps::<Counter>::new(id.clone())
         .spawn(&system)

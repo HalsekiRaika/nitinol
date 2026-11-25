@@ -101,7 +101,7 @@ impl<A: Aggregate> AggregateProps<A, Unhosted> {
     /// let store = CustomStore::builder().eventstore(InMemoryEventStore::default()).build();
     /// let system = EventSourceSystem::builder(ps)
     ///     .with_persistence(PersistenceProvider::new(store))
-    ///     .build();
+    ///     .build().await;
     /// AggregateProps::<Counter>::new(AggregateId::new("counter"))
     ///     .spawn(&system)
     ///     .await;

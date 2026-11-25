@@ -61,7 +61,8 @@ async fn main() {
     // own.
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
     let store = system.persistence().event_store();
 
     let order_id = AggregateId::new("order-cobalt-42");

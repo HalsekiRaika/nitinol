@@ -157,7 +157,8 @@ async fn aggregate_and_saga_share_one_journal() {
 
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
     let store = system.persistence().event_store();
 
     let order_id = AggregateId::new("direct-order");
@@ -236,7 +237,8 @@ async fn saga_proxy_drop_does_not_stop_upstream_subscription() {
 
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
     let store = system.persistence().event_store();
 
     let order_id = AggregateId::new("drop-proxy-order");
@@ -295,7 +297,8 @@ async fn saga_replays_its_own_stream_via_direct_store_on_respawn() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
     let store = system.persistence().event_store();
 
     let order_id = AggregateId::new("replay-order");

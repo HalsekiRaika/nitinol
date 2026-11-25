@@ -189,10 +189,12 @@ async fn every_entry_point_builds_the_saga_from_the_components_it_is_handed() {
     // one progress record rather than two entry points into the same wiring.
     let props_system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
 
     // Entry point 1 — `SagaManagerProps`, spawned on a system, which is where
     // the journal it observes and persists onto comes from.

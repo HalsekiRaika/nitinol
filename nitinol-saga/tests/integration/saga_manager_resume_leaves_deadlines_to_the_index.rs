@@ -57,6 +57,7 @@ async fn system_over(
                 .build(),
         ))
         .build()
+        .await
 }
 
 /// The scope the index saga's manager records its one source under: the host

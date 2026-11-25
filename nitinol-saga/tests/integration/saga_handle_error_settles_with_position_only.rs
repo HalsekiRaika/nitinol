@@ -234,7 +234,8 @@ async fn refuse_one_record(upstream_key: &str) -> Refusal {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
 
     // One journal: the upstream stream the saga observes and the saga's own
     // stream are tenants of the store the system distributes.

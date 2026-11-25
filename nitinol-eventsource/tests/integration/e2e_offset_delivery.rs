@@ -203,7 +203,8 @@ async fn e2e_at_least_once_failed_projection_retried_on_restart() {
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let agg_id = AggregateId::new("e2e-ckpt-alo-agg");
     let projection_id = ProjectionId::new("e2e-ckpt-alo");
 
@@ -311,7 +312,8 @@ async fn e2e_exactly_once_user_saves_offset_prevents_reprocessing() {
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let agg_id = AggregateId::new("e2e-ckpt-eo-agg");
     let projection_id = ProjectionId::new("e2e-ckpt-eo");
 
@@ -402,7 +404,8 @@ async fn e2e_at_most_once_failed_event_not_retried_on_restart() {
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let agg_id = AggregateId::new("e2e-ckpt-amo-agg");
     let projection_id = ProjectionId::new("e2e-ckpt-amo");
 

@@ -204,7 +204,8 @@ async fn append_nudge(store: &Journal, sequence: u64, note: &str) {
 async fn a_saga_declaring_a_deadline_without_the_component_runs_normally() {
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
 
     let journal = system.persistence().event_store();
     append_nudge(&journal, 1, "first").await;

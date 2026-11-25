@@ -256,7 +256,8 @@ async fn single_constant_correlation_reproduces_the_resident_saga() {
                 .saga_offsets(InMemoryOffsetStore::default())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let journal = system.persistence().event_store();
 
     let order_id = AggregateId::new("mgr-degenerate-order");

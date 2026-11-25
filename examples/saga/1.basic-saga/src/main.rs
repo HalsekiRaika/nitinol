@@ -60,7 +60,8 @@ async fn main() {
     // it got to.
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
 
     let order_id = AggregateId::new("example-order");
     let order_proxy = system.spawn_aggregate::<Order>(order_id.clone()).await;

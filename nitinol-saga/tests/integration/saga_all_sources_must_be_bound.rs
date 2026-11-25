@@ -235,7 +235,8 @@ async fn wait_for_handled(handled: &Handled, expected: usize) -> Vec<&'static st
 async fn binding_every_external_source_is_enough_even_with_a_deadline_declared() {
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
     let journal = system.persistence().event_store();
 
     let placed_stream = AggregateId::new("bind-all-placed");

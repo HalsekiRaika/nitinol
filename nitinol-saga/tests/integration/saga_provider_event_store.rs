@@ -218,7 +218,8 @@ async fn host_journals_onto_the_providers_event_store() {
                 .saga_offsets(InMemoryOffsetStore::default())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let default_store = system.persistence().event_store();
 
     let order_id = AggregateId::new("saga-default-journal-orders");
@@ -270,7 +271,8 @@ async fn a_subscription_polls_the_providers_event_store() {
                 .saga_offsets(InMemoryOffsetStore::default())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let default_store = system.persistence().event_store();
 
     let order_id = AggregateId::new("saga-default-subscription-orders");
@@ -319,7 +321,8 @@ async fn a_saga_spawned_on_one_system_keeps_its_stream_out_of_another_systems_st
                 .saga_offsets(InMemoryOffsetStore::default())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let other = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
@@ -327,7 +330,8 @@ async fn a_saga_spawned_on_one_system_keeps_its_stream_out_of_another_systems_st
                 .saga_offsets(InMemoryOffsetStore::default())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let hosting_store = hosting.persistence().event_store();
     let other_store = other.persistence().event_store();
 
@@ -382,7 +386,8 @@ async fn the_hosting_systems_journal_is_the_only_upstream_polled() {
                 .saga_offsets(InMemoryOffsetStore::default())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let other = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
@@ -390,7 +395,8 @@ async fn the_hosting_systems_journal_is_the_only_upstream_polled() {
                 .saga_offsets(InMemoryOffsetStore::default())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let hosting_store = hosting.persistence().event_store();
     let other_store = other.persistence().event_store();
 

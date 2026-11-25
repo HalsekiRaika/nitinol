@@ -318,7 +318,8 @@ async fn spawn_two_source_saga<St: SagaOffsetSlot>(
 async fn each_source_is_owed_only_what_its_own_position_leaves() {
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
     let journal = system.persistence().event_store();
 
     let alpha_stream = AggregateId::new("icur-alpha");
@@ -404,7 +405,8 @@ async fn a_stalled_source_does_not_stop_the_other_from_progressing() {
                 .saga_offsets(InMemoryOffsetStore::default())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let journal = system.persistence().event_store();
 
     // Written through the decorator, which serves appends normally; only reads

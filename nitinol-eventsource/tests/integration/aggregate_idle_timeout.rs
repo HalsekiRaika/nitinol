@@ -188,10 +188,11 @@ fn activations<K: Activations>() -> usize {
 // Helpers
 
 /// A system distributing a store of its own, over `process_system`.
-fn system_on(process_system: ProcessSystem) -> EventSourceSystem<InMemoryStore> {
+async fn system_on(process_system: ProcessSystem) -> EventSourceSystem<InMemoryStore> {
     EventSourceSystem::builder(process_system)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build()
+        .await
 }
 
 /// A process system with no default idle timeout.
@@ -249,7 +250,7 @@ async fn ask_after_stop<K: Activations>(proxy: &AggregateProxy<Counter<K>>, why:
 #[tokio::test(start_paused = true)]
 async fn an_activation_with_an_idle_timeout_passivates_and_the_next_ask_replays_it() {
     // Given
-    let system = system_on(without_default().await);
+    let system = system_on(without_default().await).await;
     let proxy = AggregateProps::<Counter<UnhostedAfter>>::new(AggregateId::new(
         "aggregate-idle-timeout-unhosted-after",
     ))
@@ -300,7 +301,7 @@ async fn an_activation_with_an_idle_timeout_passivates_and_the_next_ask_replays_
 #[tokio::test(start_paused = true)]
 async fn props_from_the_system_carry_their_idle_timeout_to_the_activation() {
     // Given
-    let system = system_on(without_default().await);
+    let system = system_on(without_default().await).await;
     let proxy = system
         .aggregate_props::<Counter<HostedAfter>>(AggregateId::new(
             "aggregate-idle-timeout-hosted-after",
@@ -336,7 +337,7 @@ async fn props_from_the_system_carry_their_idle_timeout_to_the_activation() {
 #[tokio::test(start_paused = true)]
 async fn persistent_props_keep_the_activation_through_the_system_default() {
     // Given
-    let system = system_on(with_default().await);
+    let system = system_on(with_default().await).await;
     let proxy = AggregateProps::<Counter<PersistentOverDefault>>::new(AggregateId::new(
         "aggregate-idle-timeout-persistent",
     ))
@@ -370,7 +371,7 @@ async fn persistent_props_keep_the_activation_through_the_system_default() {
 #[tokio::test(start_paused = true)]
 async fn props_that_name_no_idle_timeout_stop_on_the_system_default() {
     // Given
-    let system = system_on(with_default().await);
+    let system = system_on(with_default().await).await;
     let proxy = AggregateProps::<Counter<InheritedDefault>>::new(AggregateId::new(
         "aggregate-idle-timeout-inherit",
     ))
@@ -404,7 +405,7 @@ async fn props_that_name_no_idle_timeout_stop_on_the_system_default() {
 #[tokio::test(start_paused = true)]
 async fn an_aggregate_spawned_through_the_contingent_view_stops_on_the_system_default() {
     // Given
-    let system = system_on(with_default().await);
+    let system = system_on(with_default().await).await;
     let proxy = system
         .to_contingent()
         .spawn_aggregate::<Counter<ContingentDefault>>(AggregateId::new(
@@ -510,7 +511,7 @@ async fn append(journal: &Journal, stream: &AggregateId, sequence: u64) {
 #[tokio::test(start_paused = true)]
 async fn a_projector_projects_what_arrives_after_a_quiet_journal_under_the_system_default() {
     // Given: a projector that has caught up with the one record in its stream
-    let system = system_on(with_default().await);
+    let system = system_on(with_default().await).await;
     let journal = system.event_store();
     let stream = AggregateId::new("aggregate-idle-timeout-projector");
     let model = ReadModel::default();

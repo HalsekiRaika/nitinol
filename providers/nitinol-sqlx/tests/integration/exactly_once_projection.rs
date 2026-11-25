@@ -283,7 +283,7 @@ fn event_store(pool: &PgPool) -> PostgresEventStore {
 /// Neither the journal a projector follows nor the slot it records its position
 /// in is named at the props any more, so the store a clause wants watched is
 /// named here — on the system the projector is spawned on.
-fn system_over(
+async fn system_over(
     process_system: ProcessSystem,
     pool: &PgPool,
     conflicts: &Arc<AtomicUsize>,
@@ -296,6 +296,7 @@ fn system_over(
                 .build(),
         ))
         .build()
+        .await
 }
 
 /// A counter for a clause that does not read the refusals its store answered.
@@ -431,7 +432,7 @@ async fn an_event_a_restarted_projector_is_handed_again_is_applied_once() {
 
     let never_fail = Arc::new(AtomicBool::new(false));
     let first_attempts = Arc::new(AtomicUsize::new(0));
-    let first_system = system_over(process_system.clone(), &pool, &uncounted());
+    let first_system = system_over(process_system.clone(), &pool, &uncounted()).await;
     let first = ProjectorProps::new(projection_id.clone(), {
         let fail = Arc::clone(&never_fail);
         let attempts = Arc::clone(&first_attempts);
@@ -461,7 +462,7 @@ async fn an_event_a_restarted_projector_is_handed_again_is_applied_once() {
     // When: a second projector takes the same projection over, and is handed
     // the event the first one already applied along with one it has not seen.
     let second_attempts = Arc::new(AtomicUsize::new(0));
-    let second_system = system_over(process_system, &pool, &uncounted());
+    let second_system = system_over(process_system, &pool, &uncounted()).await;
     let second = ProjectorProps::new(projection_id.clone(), {
         let fail = Arc::clone(&never_fail);
         let attempts = Arc::clone(&second_attempts);
@@ -520,7 +521,7 @@ async fn a_project_that_fails_leaves_the_read_model_and_the_offset_where_they_we
     let pool = schema.pool();
     create_read_model(&pool).await;
 
-    let system = system_over(ProcessSystem::new().await, &pool, &uncounted());
+    let system = system_over(ProcessSystem::new().await, &pool, &uncounted()).await;
     let projection_id = ProjectionId::new("sqlx.exactly-once.project-fails");
     let stream = AggregateId::new("sqlx.exactly-once.project-fails.stream");
     let events = Journal::from(event_store(&pool));
@@ -613,7 +614,7 @@ async fn a_refused_offset_save_rolls_the_read_model_update_back() {
     let conflicts = Arc::new(AtomicUsize::new(0));
     let attempts = Arc::new(AtomicUsize::new(0));
     let never_fail = Arc::new(AtomicBool::new(false));
-    let system = system_over(ProcessSystem::new().await, &pool, &conflicts);
+    let system = system_over(ProcessSystem::new().await, &pool, &conflicts).await;
     let projector = ProjectorProps::new(projection_id.clone(), {
         let fail = Arc::clone(&never_fail);
         let attempts = Arc::clone(&attempts);
@@ -701,7 +702,7 @@ async fn two_projectors_holding_one_offset_apply_the_event_once() {
     let one_conflicts = Arc::new(AtomicUsize::new(0));
     let other_conflicts = Arc::new(AtomicUsize::new(0));
 
-    let one_system = system_over(ProcessSystem::new().await, &one_pool, &one_conflicts);
+    let one_system = system_over(ProcessSystem::new().await, &one_pool, &one_conflicts).await;
     let one = ProjectorProps::new(projection_id.clone(), {
         let fail = Arc::clone(&never_fail);
         let rendezvous = Arc::clone(&rendezvous);
@@ -719,7 +720,7 @@ async fn two_projectors_holding_one_offset_apply_the_event_once() {
     .spawn(&one_system)
     .await;
 
-    let other_system = system_over(ProcessSystem::new().await, &other_pool, &other_conflicts);
+    let other_system = system_over(ProcessSystem::new().await, &other_pool, &other_conflicts).await;
     let other = ProjectorProps::new(projection_id.clone(), {
         let fail = Arc::clone(&never_fail);
         let rendezvous = Arc::clone(&rendezvous);
@@ -813,7 +814,7 @@ async fn two_projectors_starting_a_projection_together_apply_the_event_once() {
     let one_conflicts = Arc::new(AtomicUsize::new(0));
     let other_conflicts = Arc::new(AtomicUsize::new(0));
 
-    let one_system = system_over(ProcessSystem::new().await, &one_pool, &one_conflicts);
+    let one_system = system_over(ProcessSystem::new().await, &one_pool, &one_conflicts).await;
     let one = ProjectorProps::new(projection_id.clone(), {
         let fail = Arc::clone(&never_fail);
         let rendezvous = Arc::clone(&rendezvous);
@@ -831,7 +832,7 @@ async fn two_projectors_starting_a_projection_together_apply_the_event_once() {
     .spawn(&one_system)
     .await;
 
-    let other_system = system_over(ProcessSystem::new().await, &other_pool, &other_conflicts);
+    let other_system = system_over(ProcessSystem::new().await, &other_pool, &other_conflicts).await;
     let other = ProjectorProps::new(projection_id.clone(), {
         let fail = Arc::clone(&never_fail);
         let rendezvous = Arc::clone(&rendezvous);

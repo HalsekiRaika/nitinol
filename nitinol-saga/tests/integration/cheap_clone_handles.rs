@@ -269,7 +269,8 @@ async fn a_pending_view_is_restored_by_replay_after_passivation() {
     // a deadline
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
     // One journal: the probes the saga observes and the saga's own stream are
     // tenants of the store the system distributes, kept apart by key.
     let journal = system.persistence().event_store();
@@ -408,7 +409,8 @@ async fn a_host_handle_clone_reaches_the_same_manager_and_partitions() {
     let offsets = RecordingOffsetStore::new();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(delivery_persistence(&journal, &offsets))
-        .build();
+        .build()
+        .await;
 
     let saga_id = SagaId::new("instance-1");
     let refused_target = format!("cheap-clone-host-target{REFUSED_SUFFIX}");

@@ -152,7 +152,8 @@ async fn domain_event_is_persisted_as_raw_codec_payload_not_wrapped_by_envelope(
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
     let store = system.persistence().event_store();
 
     let upstream_id = AggregateId::new("envelope-encode-upstream");
@@ -275,7 +276,8 @@ async fn replay_applies_domain_event_and_never_applies_a_framework_record() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
     // One journal: the stream the boot record is on and the saga's own stream
     // are tenants of the store the system distributes.
     let store = system.persistence().event_store();

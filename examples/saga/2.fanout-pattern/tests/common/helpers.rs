@@ -149,7 +149,8 @@ pub async fn spawn_world(
                 .saga_offsets(offsets.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
 
     let payroll_run = system.spawn_aggregate::<PayrollRun>(run_id.clone()).await;
 

@@ -296,7 +296,8 @@ type Wiring = (
 async fn wiring() -> Wiring {
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
 
     let order_id = AggregateId::new(ORDER_KEY);
     let order = system.spawn_aggregate::<Order>(order_id.clone()).await;

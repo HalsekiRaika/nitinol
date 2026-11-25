@@ -388,7 +388,8 @@ async fn aggregate_event_drives_saga_to_command_target_aggregate() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
     // One journal: the order stream, the saga's own stream and the inventory's
     // are all tenants of the store the system distributes.
     let journal = system.persistence().event_store();
@@ -486,7 +487,8 @@ async fn saga_skips_events_that_correlate_to_no_instance() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
 
     let journal = system.persistence().event_store();
     let publisher_id = AggregateId::new("publisher-A");

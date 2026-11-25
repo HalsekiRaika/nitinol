@@ -234,6 +234,7 @@ mod tests {
         EventSourceSystem::builder(ProcessSystem::new().await)
             .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
             .build()
+            .await
     }
 
     /// What an activation actually resolves through [`SnapshotRecovery::persistor`]
@@ -302,7 +303,8 @@ mod tests {
             .build();
         let system = EventSourceSystem::builder(ProcessSystem::new().await)
             .with_persistence(PersistenceProvider::new(store))
-            .build();
+            .build()
+            .await;
 
         // When
         let recovery = <Latest as RecoverOnContingent<Probe>>::recovery(&system.to_contingent());

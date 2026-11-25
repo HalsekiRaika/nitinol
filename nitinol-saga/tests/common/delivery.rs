@@ -606,6 +606,7 @@ where
     EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(delivery_persistence(journal, offsets))
         .build()
+        .await
 }
 
 /// A system over a fresh in-memory journal and `offsets`, and the backend handle

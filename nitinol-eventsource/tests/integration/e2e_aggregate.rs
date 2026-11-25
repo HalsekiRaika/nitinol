@@ -110,7 +110,8 @@ async fn e2e_ask_persists_the_fact_its_decision_stated() {
     let store = persistence.event_store();
     let system = EventSourceSystem::builder(ps)
         .with_persistence(persistence)
-        .build();
+        .build()
+        .await;
     let id = AggregateId::new("e2e-agg-ask");
     let proxy = system.spawn_aggregate::<Counter>(id.clone()).await;
 
@@ -164,7 +165,8 @@ async fn e2e_persisted_state_is_visible_through_a_later_reference() {
                 .eventstore(InMemoryEventStore::default())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let id = AggregateId::new("e2e-agg-restart");
 
     // Reference 1: write one event via ask()
@@ -202,7 +204,8 @@ async fn e2e_multiple_asks_advance_sequence_monotonically() {
     let store = persistence.event_store();
     let system = EventSourceSystem::builder(ps)
         .with_persistence(persistence)
-        .build();
+        .build()
+        .await;
     let id = AggregateId::new("e2e-agg-multi");
     let proxy = system.spawn_aggregate::<Counter>(id.clone()).await;
 

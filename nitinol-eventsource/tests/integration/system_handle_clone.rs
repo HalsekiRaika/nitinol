@@ -122,7 +122,8 @@ async fn counter_system() -> (EventSourceSystem<InMemoryStore>, InMemoryStore) {
     let store = InMemoryStore::default();
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(store.clone()))
-        .build();
+        .build()
+        .await;
     (system, store)
 }
 

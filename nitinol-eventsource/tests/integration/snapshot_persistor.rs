@@ -34,7 +34,8 @@ async fn setup() -> (
                 .snapshot(InMemorySnapshotStore::default())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let snapshot_ref = system.snapshot_persistor().await;
     (system, snapshot_ref)
 }

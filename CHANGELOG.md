@@ -14,13 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default; a passivated aggregate is replayed by the next `ask`. `IdleTimeout`
   is re-exported from `nitinol-eventsource` and `nitinol::eventsource`.
 - (`nitinol-eventsource`): a projection activator, one per `EventSourceSystem`
-  and started by the first projector spawn, keeps every projection spawned on
+  and started with it, keeps every projection spawned on
   the system and starts its projector again when an event it follows is
   appended, so a projector may passivate. Projectors stay top-level processes
   that the activator watches, each reading its own offset as it starts.
   Appends through the system's own journal wake a projector at once; appends
   by other writers are found by a watcher that reads the journal every 10 s
-  from where it stood when the activator started, set with
+  from where it stood when the first projector was spawned, set with
   `EventSourceSystemBuilder::with_projection_watcher_interval` or turned off
   with `EventSourceSystemBuilder::without_projection_watcher`. The watcher
   keeps no position in the offset store. `EventSourceSystem::event_store` is
@@ -51,6 +51,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING** (`nitinol-eventsource`): `EventSourceSystemBuilder::build` is
+  async: `.build().await` returns the `EventSourceSystem`. It starts the
+  system's projection activator, so the activator runs from the build rather
+  than from the first projector spawn.
 - (`nitinol-eventsource`): `ProjectorProps::spawn` returns a `ProjectorHandle`
   instead of the projector process's `ProcessProxy`; `is_active` reports
   whether a projector runs and `stop` takes the projection out of the system

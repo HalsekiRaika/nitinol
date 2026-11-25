@@ -115,6 +115,7 @@ async fn system_over(journal: &Journal) -> EventSourceSystem<Journal> {
     EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(journal.clone()))
         .build()
+        .await
 }
 
 // Compile-time type assertion

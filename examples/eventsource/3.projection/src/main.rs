@@ -47,7 +47,8 @@ async fn main() {
     // The one supplier the journal and the projection offsets come from.
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
 
     let agg_id = AggregateId::new("proj-counter");
     let proxy = system.spawn_aggregate::<Counter>(agg_id.clone()).await;

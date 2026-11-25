@@ -139,7 +139,8 @@ async fn the_components_system_asks_a_latest_aggregate_on_a_deployment_holding_a
     // Given
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
     let handle = hosted_handle(&system).await;
     let target = AggregateId::new(format!("components-latest{SHELF_SUFFIX}"));
 

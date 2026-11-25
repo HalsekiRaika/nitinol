@@ -117,6 +117,7 @@ async fn system_over(store: &Journal) -> EventSourceSystem<Journal> {
     EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(store.clone()))
         .build()
+        .await
 }
 
 /// Activate one writer for `id` on `system`.

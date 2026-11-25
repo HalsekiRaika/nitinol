@@ -78,7 +78,7 @@
 //!     let persistence = PersistenceProvider::new(InMemoryStore::default());
 //!     let system = EventSourceSystem::builder(ps)
 //!         .with_persistence(persistence)
-//!         .build();
+//!         .build().await;
 //!
 //!     let counter = system
 //!         .spawn_aggregate::<Counter>(AggregateId::new("counter-1"))

@@ -198,6 +198,7 @@ async fn system_over(journal: &RecordingStore) -> EventSourceSystem<RecordingSag
                 .build(),
         ))
         .build()
+        .await
 }
 
 fn is_domain_event(event: &RecordedEvent) -> bool {

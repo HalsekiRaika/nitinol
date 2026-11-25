@@ -291,7 +291,8 @@ fn position_of_the_readable_record(upstream: &AggregateId) -> ConsumedFactPayloa
 async fn a_corrupt_upstream_record_is_skipped_and_writes_nothing() {
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
     let journal = system.persistence().event_store();
 
     let upstream = AggregateId::new("decode-skip-upstream");
@@ -353,7 +354,8 @@ async fn a_corrupt_upstream_record_is_skipped_and_writes_nothing() {
 async fn a_corrupt_upstream_record_is_attributed_to_no_instance() {
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
     let journal = system.persistence().event_store();
 
     let upstream = AggregateId::new("decode-skip-manager-upstream");

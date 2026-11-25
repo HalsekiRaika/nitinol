@@ -95,6 +95,7 @@ async fn a_system() -> EventSourceSystem<InMemoryStore> {
     EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build()
+        .await
 }
 
 /// Given a system over a store that supplies every slot, When a manager is

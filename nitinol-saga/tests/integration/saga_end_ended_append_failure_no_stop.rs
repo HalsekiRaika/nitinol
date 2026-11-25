@@ -192,7 +192,8 @@ async fn saga_stays_alive_when_ended_append_fails() {
                 .saga_offsets(InMemoryOffsetStore::default())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
 
     let order_id = AggregateId::new("ended-fail-order");
 

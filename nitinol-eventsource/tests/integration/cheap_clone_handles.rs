@@ -182,7 +182,8 @@ async fn counter_system() -> (EventSourceSystem<InMemoryStore>, InMemoryStore) {
     let store = InMemoryStore::default();
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(store.clone()))
-        .build();
+        .build()
+        .await;
     (system, store)
 }
 
@@ -508,7 +509,8 @@ async fn a_reference_clone_shares_its_binding() {
     let resolved_id = AggregateId::new("cheap-clone-binding-resolved");
     let rival_system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(store.clone()))
-        .build();
+        .build()
+        .await;
     let rival = rival_system
         .spawn_aggregate::<Counter>(resolved_id.clone())
         .await;
@@ -723,7 +725,8 @@ async fn a_durable_stream_opens_its_one_gate_on_subscribe() {
     let store = InMemoryEventStore::default();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(Journal::from(store.clone())))
-        .build();
+        .build()
+        .await;
     let key = AggregateId::new("cheap-clone-gate-agg");
     for sequence in 1..=3 {
         append_evt(&store, key.as_str(), sequence).await;

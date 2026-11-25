@@ -220,7 +220,8 @@ async fn the_host_uses_the_providers_event_store_for_upstream_and_journal() {
                 .saga_offsets(InMemoryOffsetStore::default())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let default_store = system.persistence().event_store();
 
     let upstream_key = AggregateId::new("mgr-default-store-orders");
@@ -281,7 +282,8 @@ async fn the_hosting_systems_journal_is_the_only_upstream_the_manager_polls() {
                 .saga_offsets(InMemoryOffsetStore::default())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let other = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
@@ -289,7 +291,8 @@ async fn the_hosting_systems_journal_is_the_only_upstream_the_manager_polls() {
                 .saga_offsets(InMemoryOffsetStore::default())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let hosting_store = hosting.persistence().event_store();
     let other_store = other.persistence().event_store();
 

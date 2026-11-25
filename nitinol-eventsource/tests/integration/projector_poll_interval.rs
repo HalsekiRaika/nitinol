@@ -207,6 +207,7 @@ async fn system_over(journal: &RecordingJournal) -> EventSourceSystem<RecordedSt
                 .build(),
         ))
         .build()
+        .await
 }
 
 /// Append the records numbered `from..=through` to `stream`.

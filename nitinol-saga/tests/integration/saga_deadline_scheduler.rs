@@ -469,6 +469,7 @@ async fn in_memory_system() -> EventSourceSystem<InMemoryStore> {
     EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build()
+        .await
 }
 
 /// Spawn a host over [`TimerSaga`] with no scheduler wiring: the alphabet
@@ -614,7 +615,8 @@ async fn a_decision_and_the_deadline_it_sets_reach_the_store_in_one_append() {
                 .saga_offsets(InMemoryOffsetStore::default())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let fired = Arc::new(Mutex::new(Vec::<String>::new()));
 
     let _host = spawn_timer_saga(&system, "deadline-upstream-batch", &fired).await;

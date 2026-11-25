@@ -315,7 +315,8 @@ async fn spawn_writer(
 ) -> AggregateProxy<Counter> {
     let system = EventSourceSystem::builder(ps.clone())
         .with_persistence(PersistenceProvider::new(store.clone()))
-        .build();
+        .build()
+        .await;
     AggregateProps::<Counter>::new(id.clone())
         .spawn(&system)
         .await

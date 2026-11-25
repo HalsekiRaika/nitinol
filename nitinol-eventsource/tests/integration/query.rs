@@ -174,7 +174,8 @@ async fn exec_delivers_the_query_response_exactly_once() {
         .with_persistence(PersistenceProvider::new(Journal::from(
             InMemoryEventStore::default(),
         )))
-        .build();
+        .build()
+        .await;
     let proxy = AggregateProps::<TallyCounter>::new(AggregateId::new("query-tally"))
         .spawn(&system)
         .await;
@@ -226,7 +227,8 @@ async fn exec_delivers_query_error_as_exec_error_domain() {
         .with_persistence(PersistenceProvider::new(Journal::from(
             InMemoryEventStore::default(),
         )))
-        .build();
+        .build()
+        .await;
     let proxy = AggregateProps::<Counter>::new(AggregateId::new("query-unlabelled"))
         .spawn(&system)
         .await;

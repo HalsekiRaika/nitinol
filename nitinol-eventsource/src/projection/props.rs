@@ -295,7 +295,7 @@ where
             idle_timeout: self.idle_timeout,
         };
 
-        let activator = system.projection_activator().await;
+        let activator = system.projection_activator();
         activator.ask(Register(Box::new(declaration))).await.expect(
             "the projection activator is persistent and resumes, so it answers every registration",
         );
@@ -337,7 +337,7 @@ where
     /// let ps = ProcessSystem::new().await;
     /// let system = EventSourceSystem::builder(ps)
     ///     .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-    ///     .build();
+    ///     .build().await;
     /// // compile error: spawn() requires EventSet — call with_event() first
     /// ProjectorProps::new(ProjectionId::new("p"), MyProj::new)
     ///     .spawn(&system)
@@ -438,7 +438,7 @@ mod compile_fail_fixtures {
     /// let ps = ProcessSystem::new().await;
     /// let system = EventSourceSystem::builder(ps)
     ///     .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-    ///     .build();
+    ///     .build().await;
     /// // compile error: spawn() requires OriginSet — call catchup_from_aggregate() or catchup_from_global() first
     /// ProjectorProps::new(ProjectionId::new("p"), MyProj::new)
     ///     .with_event::<MyEv>()
@@ -482,7 +482,7 @@ mod compile_fail_fixtures {
     /// let store = CustomStore::builder().eventstore(InMemoryEventStore::default()).build();
     /// let system = EventSourceSystem::builder(ps)
     ///     .with_persistence(PersistenceProvider::new(store))
-    ///     .build();
+    ///     .build().await;
     /// // compile error: unsatisfied trait bound — the store is not a `ProjectionOffsetSlot`
     /// ProjectorProps::new(ProjectionId::new("read-model"), || ReadModel)
     ///     .with_event::<MyEv>()
@@ -536,7 +536,7 @@ mod compile_fail_fixtures {
     /// // `InMemoryStore`'s projection offsets have `Tx = ()`, not `MyTx`
     /// let system = EventSourceSystem::builder(ps)
     ///     .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-    ///     .build();
+    ///     .build().await;
     /// // compile error: type mismatch — `spawn` requires the offset store's `Tx` to be `MyTx`
     /// ProjectorProps::new(ProjectionId::new("p"), || MyProj)
     ///     .with_tx_provider(MyTxProvider)

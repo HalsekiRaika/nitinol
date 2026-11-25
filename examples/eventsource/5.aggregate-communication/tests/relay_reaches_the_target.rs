@@ -58,7 +58,8 @@ async fn a_fact_of_one_aggregate_reaches_another_as_a_command() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
     // What the last clause reads is the journal the system's spawns resolve.
     let store = system.persistence().event_store();
 

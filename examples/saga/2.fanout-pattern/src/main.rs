@@ -62,7 +62,8 @@ async fn main() {
     // a compile error at the wiring rather than a failure at the first save.
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
 
     let run_id = AggregateId::new("payroll-run-april");
     let employees = employee_ids();

@@ -53,7 +53,7 @@ pub struct CursorSet(SequenceCursor);
 /// # let ps = ProcessSystem::new().await;
 /// let system = EventSourceSystem::builder(ps)
 ///     .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-///     .build();
+///     .build().await;
 /// // compile error: spawn() requires CursorSet — call cursor(...) first
 /// DurableStream::<()>::new(ProcessName::new("topic"), |_: LoadedEvent| None)
 ///     .spawn(&system)

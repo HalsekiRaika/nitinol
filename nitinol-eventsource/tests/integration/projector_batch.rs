@@ -73,6 +73,7 @@ where
                 .build(),
         ))
         .build()
+        .await
 }
 
 fn applied(sequence: u64, tx: Option<u64>) -> Step {

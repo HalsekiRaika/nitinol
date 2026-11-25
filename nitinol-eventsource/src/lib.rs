@@ -71,7 +71,7 @@
 //! let ps = ProcessSystem::new().await;
 //! let system = EventSourceSystem::builder(ps)
 //!     .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-//!     .build();
+//!     .build().await;
 //!
 //! let counter: AggregateProxy<Counter> =
 //!     system.spawn_aggregate(AggregateId::new("counter-1")).await;
@@ -102,8 +102,8 @@
 //! starts it again when an event it follows is appended: at once for an append
 //! through the system's own journal, and within the projection watcher's
 //! interval for one by another writer to the same store. The watcher reads
-//! from the journal's end as the activator started; what was written before is
-//! read by each projector's own catch-up from its recorded offset.
+//! from the journal's end as the first projector was spawned; what was written
+//! before is read by each projector's own catch-up from its recorded offset.
 //!
 //! # Observing lost races
 //!

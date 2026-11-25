@@ -162,6 +162,7 @@ async fn system_over<St: Store>(store: St) -> EventSourceSystem<St> {
     EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(store))
         .build()
+        .await
 }
 
 /// Props with neither a codec step nor a snapshot codec argument, and no

@@ -171,7 +171,8 @@ async fn observe(interval: Option<Duration>) -> Observer {
                 .saga_offsets(InMemoryOffsetStore::default())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
 
     let key = AggregateId::new(UPSTREAM_KEY);
     let subscription = Subscription::stream(&key);

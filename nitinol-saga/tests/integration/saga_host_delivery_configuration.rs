@@ -96,6 +96,7 @@ where
     EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(delivery_persistence(journal, offsets))
         .build()
+        .await
 }
 
 /// The declared source, bound to a stream nothing is ever appended to.

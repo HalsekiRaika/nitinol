@@ -247,6 +247,7 @@ async fn system_over<St: Store>(store: St) -> EventSourceSystem<St> {
     EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(store))
         .build()
+        .await
 }
 
 /// A store holding `events` as its journal and no other slot.

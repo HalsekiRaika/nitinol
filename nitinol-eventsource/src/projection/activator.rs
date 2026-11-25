@@ -39,8 +39,9 @@ use self::watcher::Seen;
 /// - What tells the activator a projector is needed is an append. Appends made
 ///   through the system's own journal are reported to it as they are accepted;
 ///   appends made anywhere else are found by the watcher, its child, which
-///   reads the journal from its head as the activator started — from its start
-///   if the head could not be read — at a long interval. Each projection whose stream or handlers the appended
+///   reads the journal from its head as the first projection was registered —
+///   from its start if the head could not be read — at a long interval. Each
+///   projection whose stream or handlers the appended
 ///   events match is woken: a running projector by being told to read at once,
 ///   a stopped one by being activated again.
 ///
@@ -59,7 +60,7 @@ use self::watcher::Seen;
 /// again at once — or after, when the projector is stopped and is activated
 /// for it then.
 ///
-/// What no append announced — records from before the activator started, or
+/// What no append announced — records from before the watcher started, or
 /// ones the reads of an activation failed on — is counted in neither. An
 /// activation that stops on its idle timeout before it reported a settled batch
 /// or a read that found nothing is activated again once its poll interval has
@@ -98,6 +99,8 @@ pub(crate) struct ProjectionActivator {
     /// reuses, so a [`RetryActivation`] kept waiting through an unregister and
     /// a register of the same id is not mistaken for one of the new entry.
     activations: u64,
+    /// The watcher not yet started: it is taken by the first registration, so
+    /// a system with no projection reads nothing.
     watcher: Option<WatcherSource>,
 }
 
@@ -236,11 +239,11 @@ pub(crate) type Stopped = oneshot::Receiver<()>;
 impl ProjectionActivator {
     /// Start a system's activator on `system`, where it spawns projectors too.
     ///
-    /// Called from exactly one place: the memoised cell a system's node holds,
-    /// on the first projector spawn. The system's journal reports its appends
-    /// to whatever that cell holds, so from then on they reach this activator.
-    /// It is persistent, because nothing would wake it, and resumes rather
-    /// than restarting, which would drop every registration it holds.
+    /// Called from exactly one place: the system's build, once per system. The
+    /// system's journal reports its appends to the activator this returns, so
+    /// they reach it from the system's first append on. It is persistent,
+    /// because nothing would wake it, and resumes rather than restarting,
+    /// which would drop every registration it holds.
     pub(crate) async fn spawn(
         system: &ProcessSystem,
         watcher: Option<WatcherSource>,
@@ -385,13 +388,12 @@ impl ProjectionActivator {
             }
         }
     }
-}
 
-impl Process for ProjectionActivator {
-    async fn on_start(&mut self, ctx: &mut ProcessContext<Self>) {
-        let Some(source) = self.watcher.clone() else {
-            return;
-        };
+    /// Start the watcher over `source` as this activator's child.
+    ///
+    /// Reading the journal's head here is the one read an activator handler
+    /// makes itself, and it is made once in the system's lifetime.
+    async fn start_watcher(&mut self, ctx: &mut ProcessContext<Self>, source: WatcherSource) {
         // Everything past the journal's head is the watcher's; what lies at or
         // before it is read by a projector's first activation. A head that
         // cannot be read leaves no such line, so the watcher reads from the
@@ -412,7 +414,9 @@ impl Process for ProjectionActivator {
             .spawn_child(ctx, source.journal, SequenceCursor::Global { after })
             .await;
     }
+}
 
+impl Process for ProjectionActivator {
     async fn on_terminated(&mut self, terminated: Terminated, ctx: &mut ProcessContext<Self>) {
         if let Some(stopped) = self.stopping.remove(&terminated.who) {
             // A stopper that gave up waiting has nothing to be told; the
@@ -462,6 +466,11 @@ impl Receive<Register> for ProjectionActivator {
         Register(declaration): Register,
         ctx: &mut ProcessContext<Self>,
     ) -> Result<(), Infallible> {
+        // Started before the projection is activated, so the head it reads
+        // lies at or before what that activation's catch-up reads.
+        if let Some(source) = self.watcher.take() {
+            self.start_watcher(ctx, source).await;
+        }
         let id = declaration.projection_id().clone();
         if let Some(entry) = self.entries.get(&id) {
             if entry.running.is_none() {
@@ -845,7 +854,8 @@ mod tests {
             let system = EventSourceSystem::builder(ProcessSystem::new().await)
                 .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
                 .without_projection_watcher()
-                .build();
+                .build()
+                .await;
             let id = ProjectionId::new(name);
             let stream = AggregateId::new(name);
             if journaled_before_spawn {
@@ -854,7 +864,7 @@ mod tests {
             let activations = Arc::new(AtomicUsize::new(0));
             let refused = Arc::new(AtomicUsize::new(0));
             let handle = spawn_refusing(&system, name, idle_timeout, &activations, &refused).await;
-            let activator = system.projection_activator().await;
+            let activator = system.projection_activator();
             let projector = activator
                 .ask(RunningProjector(id))
                 .await

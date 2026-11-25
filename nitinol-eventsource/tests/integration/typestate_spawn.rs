@@ -88,7 +88,8 @@ async fn aggregate_props_correct_chain_compiles_and_spawns() {
         .with_persistence(PersistenceProvider::new(Journal::from(
             InMemoryEventStore::default(),
         )))
-        .build();
+        .build()
+        .await;
 
     // When: the full required chain
     let proxy = AggregateProps::<Counter>::new(AggregateId::new("typestate-agg-ok"))
@@ -116,7 +117,8 @@ async fn projector_props_correct_chain_compiles_and_spawns() {
                 .projection_offsets(offset_store)
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
 
     // When: full required chain
     let _proxy = ProjectorProps::new(ProjectionId::new("typestate-proj-ok"), NoopProjector::new)
@@ -149,7 +151,8 @@ async fn projector_props_multiple_with_event_calls_compile_and_spawn() {
                 .projection_offsets(offset_store)
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
 
     // When: two with_event() calls followed by catchup → spawn
     let _proxy = ProjectorProps::new(
@@ -179,7 +182,8 @@ async fn projector_props_catchup_from_aggregate_enables_spawn() {
                 .projection_offsets(offset_store)
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
 
     let agg_id = AggregateId::new("typestate-agg-origin");
 

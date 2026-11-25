@@ -1,8 +1,8 @@
 //! The activator's watcher: a slow read of the whole journal, for appends no
 //! notification announced.
 //!
-//! It reads from the journal's head as the activator starts and keeps no
-//! position: what other processes wrote before that is read by each
+//! It reads from the journal's head as the first projector is spawned and
+//! keeps no position: what other processes wrote before that is read by each
 //! projector's own catch-up when it is first activated. Should the head not be
 //! readable, it reads from the journal's start instead, so that nothing
 //! written between a projector's catch-up and the watcher's first read is

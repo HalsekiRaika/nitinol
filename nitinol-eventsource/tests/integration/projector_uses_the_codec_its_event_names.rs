@@ -243,7 +243,8 @@ async fn each_subscribed_event_is_decoded_by_the_codec_it_names() {
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let agg_id = AggregateId::new("named-projection-source");
 
     seed(

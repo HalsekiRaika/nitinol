@@ -6,7 +6,6 @@ use async_trait::async_trait;
 use nitinol_persistence::store::AppendObserver;
 use nitinol_persistence::{AppendOutcome, EventType};
 use nitinol_runtime::process::ProcessProxy;
-use tokio::sync::OnceCell;
 
 use super::ProjectionActivator;
 
@@ -37,20 +36,18 @@ impl Appended {
 }
 
 /// What a system's journal reports its appends to: it tells each accepted
-/// append to the system's activator, once one is running.
+/// append to the system's activator, which runs from the moment the system is
+/// built.
 ///
-/// It reads the very cell the system's node starts its activator in, and never
-/// starts one itself. Before the first projector is spawned there is no
-/// activator, and an append is reported to nobody — nothing could be woken by
-/// it.
+/// Before any projection is registered, a notice names nothing the activator
+/// follows, and wakes nothing.
 pub(crate) struct ActivatorNotifier {
-    activator: Arc<OnceCell<ProcessProxy<ProjectionActivator>>>,
+    activator: ProcessProxy<ProjectionActivator>,
 }
 
 impl ActivatorNotifier {
-    /// A notifier telling appends to the activator `activator` holds once it
-    /// is started.
-    pub(crate) fn new(activator: Arc<OnceCell<ProcessProxy<ProjectionActivator>>>) -> Self {
+    /// A notifier telling appends to `activator`.
+    pub(crate) fn new(activator: ProcessProxy<ProjectionActivator>) -> Self {
         Self { activator }
     }
 }
@@ -58,9 +55,6 @@ impl ActivatorNotifier {
 #[async_trait]
 impl AppendObserver for ActivatorNotifier {
     async fn appended(&self, key: &str, outcome: &AppendOutcome, types: &[EventType]) {
-        let Some(activator) = self.activator.get() else {
-            return;
-        };
         let Some(appended) = Appended::of(key, outcome, types) else {
             return;
         };
@@ -68,7 +62,7 @@ impl AppendObserver for ActivatorNotifier {
         // The activator runs as long as the process system does, so it refuses
         // a notice only while that shuts down, its projectors with it. The
         // append itself was accepted, so it is not failed for that.
-        if let Err(error) = activator.tell(appended).await {
+        if let Err(error) = self.activator.tell(appended).await {
             tracing::debug!(
                 stream = %stream,
                 head,
@@ -122,21 +116,6 @@ mod tests {
         assert!(
             Appended::of("stream", &outcome(Vec::new()), &[]).is_none(),
             "an append that was assigned no position has nothing to wake"
-        );
-    }
-
-    #[tokio::test]
-    async fn an_append_before_any_activator_returns_without_starting_one() {
-        let activator = Arc::new(OnceCell::new());
-        let notifier = ActivatorNotifier::new(Arc::clone(&activator));
-
-        notifier
-            .appended("stream", &outcome(vec![7]), &[FIRST])
-            .await;
-
-        assert!(
-            activator.get().is_none(),
-            "an append must not start the activator: only the first projector spawn does"
         );
     }
 }

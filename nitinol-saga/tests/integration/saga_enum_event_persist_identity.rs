@@ -170,7 +170,8 @@ async fn saga_persist_stores_the_declared_event_type_for_every_arm() {
                 .saga_offsets(InMemoryOffsetStore::default())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let store = system.persistence().event_store();
 
     let upstream_id = AggregateId::new("identity-upstream-agg");

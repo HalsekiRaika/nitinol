@@ -119,6 +119,7 @@ pub async fn spawn_system(store: Journal) -> PlainSystem {
     EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(store))
         .build()
+        .await
 }
 
 /// Everything one incarnation of the example owns.
@@ -157,7 +158,8 @@ where
 {
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(example_persistence(journal, offsets))
-        .build();
+        .build()
+        .await;
 
     let order = system.spawn_aggregate::<Order>(order_id.clone()).await;
 

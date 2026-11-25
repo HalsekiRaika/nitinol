@@ -49,7 +49,8 @@ async fn main() {
     //    writes it.
     let system = EventSourceSystem::builder(ps)
         .with_persistence(persistence)
-        .build();
+        .build()
+        .await;
 
     // 4. Spawn the aggregate process.
     let id = AggregateId::new("counter-1");

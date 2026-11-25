@@ -273,6 +273,7 @@ async fn in_memory_system() -> EventSourceSystem<InMemoryStore> {
     EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build()
+        .await
 }
 
 /// The SKUs the saga's own stream carries, decoded with the codec its event

@@ -198,7 +198,8 @@ async fn manager_fires_the_degenerate_instances_timer() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
 
     // One journal: the trigger stream the instance observes and the instance's
     // own stream are tenants of the store the system distributes.

@@ -347,10 +347,11 @@ fn store_over(pool: &PgPool) -> PostgresStore {
 
 /// A system over `pool` with this backend's whole store behind it, so `Latest`
 /// recovery and the snapshot persistor reach the snapshot table.
-fn system_over(ps: &ProcessSystem, pool: &PgPool) -> EventSourceSystem<PostgresStore> {
+async fn system_over(ps: &ProcessSystem, pool: &PgPool) -> EventSourceSystem<PostgresStore> {
     EventSourceSystem::builder(ps.clone())
         .with_persistence(PersistenceProvider::new(store_over(pool)))
         .build()
+        .await
 }
 
 fn fixed_instant() -> Timestamp {
@@ -506,7 +507,7 @@ fn activation(c: &mut Criterion, rt: &Runtime, pool: &PgPool) {
                 async move {
                     let mut measured = Duration::ZERO;
                     for _ in 0..iters {
-                        let system = system_over(&ps, &pool);
+                        let system = system_over(&ps, &pool).await;
 
                         let started = Instant::now();
                         let aggregate = system.spawn_aggregate::<Counter>(id.clone()).await;
@@ -534,7 +535,7 @@ fn activation(c: &mut Criterion, rt: &Runtime, pool: &PgPool) {
                 async move {
                     let mut measured = Duration::ZERO;
                     for _ in 0..iters {
-                        let system = system_over(&ps, &pool);
+                        let system = system_over(&ps, &pool).await;
                         system.snapshot_persistor().await;
 
                         let started = Instant::now();
@@ -587,7 +588,7 @@ fn exactly_once(c: &mut Criterion, rt: &Runtime, pool: &PgPool) {
     for (count, measurement) in PROJECTED {
         let followed = AggregateId::new(format!("bench-projection-followed-{count}"));
         rt.block_on(seeded(&seeder, &followed, count));
-        let system = system_over(&ps, pool);
+        let system = rt.block_on(system_over(&ps, pool));
         let system = &system;
 
         group.measurement_time(measurement);

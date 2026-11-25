@@ -182,6 +182,7 @@ async fn system_over(journal: RecordingStore) -> EventSourceSystem<ReplayStore> 
                 .build(),
         ))
         .build()
+        .await
 }
 
 #[async_trait]

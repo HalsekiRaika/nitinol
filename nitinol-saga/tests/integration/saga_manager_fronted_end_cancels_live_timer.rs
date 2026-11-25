@@ -251,7 +251,8 @@ async fn terminal_end_cancels_the_live_timer_so_it_never_fires() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
 
     // One journal: the pings the instance observes and the instance's own
     // stream are tenants of the store the system distributes.

@@ -309,7 +309,8 @@ async fn wait_for_fired(fired: &Arc<Mutex<Vec<String>>>, label: &str) -> Vec<Str
 async fn replay_does_not_rearm_a_cancelled_deadline() {
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
 
     // One journal: the saga's own stream and the upstream boot record are
     // tenants of the store the system distributes, kept apart by stream key.

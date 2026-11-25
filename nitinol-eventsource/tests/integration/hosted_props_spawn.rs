@@ -227,7 +227,8 @@ async fn aggregate_props_from_a_system_spawn_without_a_process_system() {
     let store = InMemoryStore::default();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(store.clone()))
-        .build();
+        .build()
+        .await;
     let id = AggregateId::new("hosted-aggregate-props");
 
     // When: nothing but the props is named here
@@ -257,7 +258,8 @@ async fn aggregate_props_from_a_system_resolve_on_that_system() {
     let store = InMemoryStore::default();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(store.clone()))
-        .build();
+        .build()
+        .await;
     let id = AggregateId::new("hosted-aggregate-props-resolve");
 
     let first = system.spawn_aggregate::<Counter>(id.clone()).await;
@@ -306,7 +308,8 @@ async fn projector_props_from_a_system_spawn_without_a_process_system() {
     let store = InMemoryStore::default();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(store.clone()))
-        .build();
+        .build()
+        .await;
     let id = AggregateId::new("hosted-projector-props");
     let projection = ProjectionId::new("hosted-projector-props-read-model");
 
@@ -380,7 +383,8 @@ async fn props_built_directly_write_to_the_store_of_the_system_they_are_given() 
     let events = Journal::from(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(events.clone()))
-        .build();
+        .build()
+        .await;
     let id = AggregateId::new("unhosted-aggregate-props");
 
     // When
@@ -412,7 +416,8 @@ async fn hosted_props_work_over_an_assembled_store() {
     let events = persistence.event_store();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(persistence)
-        .build();
+        .build()
+        .await;
     let id = AggregateId::new("hosted-aggregate-props-assembled");
 
     // When

@@ -188,7 +188,8 @@ async fn projector_single_event_type_project_called_during_catchup() {
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let agg_id = AggregateId::new("proj-single-agg");
 
     append_counted(&event_store, &agg_id, 1).await;
@@ -230,7 +231,8 @@ async fn projector_context_provides_correct_projection_id() {
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let agg_id = AggregateId::new("proj-ctx-id-agg");
     let projection_id = ProjectionId::new("my-projection");
 
@@ -278,7 +280,8 @@ async fn projector_context_provides_current_sequence() {
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let agg_id = AggregateId::new("proj-ctx-seq-agg");
 
     for seq in 1..=3 {
@@ -326,7 +329,8 @@ async fn projector_multiple_event_types_each_receives_correct_event() {
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let agg_id = AggregateId::new("proj-multi-agg");
 
     append_counted(&event_store, &agg_id, 1).await;
@@ -377,7 +381,8 @@ async fn projector_live_event_is_projected_after_catchup() {
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let agg_id = AggregateId::new("proj-live-agg");
     let projection_id = ProjectionId::new("proj-live");
 
@@ -432,7 +437,8 @@ async fn projector_dispatches_on_the_declaration_a_row_carries_and_not_its_desce
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let agg_id = AggregateId::new("proj-identity-dispatch-agg");
 
     event_store

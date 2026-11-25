@@ -134,7 +134,8 @@ async fn e2e_aggregate_ask_then_catchup_projection_sees_event() {
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let id = AggregateId::new("e2e-proj-catchup-agg");
 
     let agg_proxy = system.spawn_aggregate::<Counter>(id.clone()).await;
@@ -177,7 +178,8 @@ async fn e2e_live_projection_sees_published_event_envelope() {
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let agg_id = AggregateId::new("e2e-proj-live-agg");
 
     let count = Arc::new(AtomicUsize::new(0));
@@ -220,7 +222,8 @@ async fn e2e_at_most_once_delivery_advances_offset_before_project() {
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let id = AggregateId::new("e2e-proj-amo-agg");
     let projection_id = ProjectionId::new("e2e-proj-amo");
 

@@ -338,7 +338,8 @@ fn activation(c: &mut Criterion) {
                     for _ in 0..iters {
                         let system = EventSourceSystem::builder(ps.clone())
                             .with_persistence(PersistenceProvider::new(store.clone()))
-                            .build();
+                            .build()
+                            .await;
 
                         let started = Instant::now();
                         let aggregate = system.spawn_aggregate::<Counter>(id.clone()).await;
@@ -368,7 +369,8 @@ fn activation(c: &mut Criterion) {
                     for _ in 0..iters {
                         let system = EventSourceSystem::builder(ps.clone())
                             .with_persistence(PersistenceProvider::new(store.clone()))
-                            .build();
+                            .build()
+                            .await;
                         system.snapshot_persistor().await;
 
                         let started = Instant::now();
@@ -425,11 +427,12 @@ fn projector_catchup(c: &mut Criterion) {
     group.sampling_mode(SamplingMode::Flat);
 
     for count in SEEDED {
-        let system = EventSourceSystem::builder(ps.clone())
-            .with_persistence(PersistenceProvider::new(
-                rt.block_on(seeded(&followed, count)),
-            ))
-            .build();
+        let store = rt.block_on(seeded(&followed, count));
+        let system = rt.block_on(
+            EventSourceSystem::builder(ps.clone())
+                .with_persistence(PersistenceProvider::new(store))
+                .build(),
+        );
         let system = &system;
 
         group.throughput(Throughput::Elements(count));

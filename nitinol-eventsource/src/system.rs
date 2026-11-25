@@ -88,7 +88,7 @@ impl<St> Hosted<St> {
 /// # let ps = ProcessSystem::new().await;
 /// let system = EventSourceSystem::builder(ps)
 ///     .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-///     .build();
+///     .build().await;
 /// # }
 /// ```
 pub struct EventSourceSystemBuilder<P = PersistenceUnset> {
@@ -158,12 +158,22 @@ impl<St: Store> EventSourceSystemBuilder<PersistenceProvider<St>> {
         self
     }
 
-    /// Finalize construction and return the configured [`EventSourceSystem`].
-    pub fn build(self) -> EventSourceSystem<St> {
+    /// Finalize construction and return the configured [`EventSourceSystem`],
+    /// with its projection activator running.
+    pub async fn build(self) -> EventSourceSystem<St> {
+        // The watcher only reads, so it takes the supplier's journal rather
+        // than one observed by the activator it reports to.
+        let watcher = match self.projection_watcher {
+            WatcherSetting::Every(interval) => {
+                Some(WatcherSource::new(self.persistence.event_store(), interval))
+            }
+            WatcherSetting::Disabled => None,
+        };
+        let projection_activator = ProjectionActivator::spawn(&self.ps, watcher).await;
         EventSourceSystem {
             inner: Arc::new(Inner {
                 persistence: self.persistence,
-                node: Node::new(self.ps, self.projection_watcher),
+                node: Node::new(self.ps, projection_activator),
             }),
         }
     }
@@ -229,23 +239,21 @@ struct NodeInner {
     /// contract is written for a single consumer serialising its calls: a second
     /// process over one store would be two.
     snapshot_persistor: OnceCell<SnapshotPersistorProxy>,
-    /// The one projection activator a system runs, started by the first
-    /// projector spawn.
+    /// The one projection activator a system runs, started with it by
+    /// [`build`][EventSourceSystemBuilder::build].
     ///
     /// One per node, so that a projection id names one registration however
-    /// many clones of the system spawn it. Shared with `append_notifier`,
-    /// which reads it to find the activator to tell.
-    projection_activator: Arc<OnceCell<ProcessProxy<ProjectionActivator>>>,
+    /// many clones of the system spawn it. `append_notifier` tells the same
+    /// activator of every append.
+    projection_activator: ProcessProxy<ProjectionActivator>,
     /// What every journal this node hands out reports its appends to, and what
-    /// tells them to the activator once it runs.
+    /// tells them to the activator.
     append_notifier: Arc<ActivatorNotifier>,
-    projection_watcher: WatcherSetting,
 }
 
 impl Node {
-    fn new(ps: ProcessSystem, projection_watcher: WatcherSetting) -> Self {
-        let projection_activator = Arc::new(OnceCell::new());
-        let append_notifier = Arc::new(ActivatorNotifier::new(Arc::clone(&projection_activator)));
+    fn new(ps: ProcessSystem, projection_activator: ProcessProxy<ProjectionActivator>) -> Self {
+        let append_notifier = Arc::new(ActivatorNotifier::new(projection_activator.clone()));
         Self {
             inner: Arc::new(NodeInner {
                 ps,
@@ -253,7 +261,6 @@ impl Node {
                 snapshot_persistor: OnceCell::new(),
                 projection_activator,
                 append_notifier,
-                projection_watcher,
             }),
         }
     }
@@ -264,27 +271,9 @@ impl Node {
         journal.observed_by(Arc::clone(&self.inner.append_notifier) as _)
     }
 
-    /// This node's projection activator, starting it on the first call.
-    ///
-    /// `watcher` builds the watcher's source from the asking system's store,
-    /// which is the same store every time for the reason
-    /// [`snapshot_persistor`][Self::snapshot_persistor] states; it is called
-    /// only when the activator starts and the node runs a watcher.
-    async fn projection_activator(
-        &self,
-        watcher: impl FnOnce(Duration) -> WatcherSource,
-    ) -> ProcessProxy<ProjectionActivator> {
-        self.inner
-            .projection_activator
-            .get_or_init(|| async {
-                let watcher = match self.inner.projection_watcher {
-                    WatcherSetting::Every(interval) => Some(watcher(interval)),
-                    WatcherSetting::Disabled => None,
-                };
-                ProjectionActivator::spawn(&self.inner.ps, watcher).await
-            })
-            .await
-            .clone()
+    /// This node's projection activator.
+    fn projection_activator(&self) -> &ProcessProxy<ProjectionActivator> {
+        &self.inner.projection_activator
     }
 
     fn process_system(&self) -> &ProcessSystem {
@@ -429,7 +418,7 @@ impl<St: Store> EventSourceSystem<St> {
     /// # async fn wiring() {
     /// # let ps = ProcessSystem::new().await;
     /// // no `with_persistence` — there are no stores to spawn onto
-    /// let system = EventSourceSystem::builder(ps).build();
+    /// let system = EventSourceSystem::builder(ps).build().await;
     /// # }
     /// ```
     pub async fn spawn_aggregate<A>(&self, id: AggregateId) -> AggregateProxy<A>
@@ -528,7 +517,7 @@ impl<St: SnapshotSlot> EventSourceSystem<St> {
     /// let store = CustomStore::builder().eventstore(InMemoryEventStore::default()).build();
     /// let system = EventSourceSystem::builder(ps)
     ///     .with_persistence(PersistenceProvider::new(store))
-    ///     .build();
+    ///     .build().await;
     /// system.snapshot_persistor().await;
     /// # }
     /// ```
@@ -567,7 +556,7 @@ impl<St: ProjectionOffsetSlot> EventSourceSystem<St> {
     /// let store = CustomStore::builder().eventstore(InMemoryEventStore::default()).build();
     /// let system = EventSourceSystem::builder(ps)
     ///     .with_persistence(PersistenceProvider::new(store))
-    ///     .build();
+    ///     .build().await;
     /// system.projector_props(ProjectionId::new("read-model"), || ReadModel);
     /// # }
     /// ```
@@ -588,13 +577,10 @@ impl<St: ProjectionOffsetSlot> EventSourceSystem<St> {
         ProjectorProps::new(projection_id, producer).hosted(self.clone())
     }
 
-    /// This system's projection activator, starting it — and, unless the
-    /// builder disabled it, its watcher — on the first call.
-    pub(crate) async fn projection_activator(&self) -> ProcessProxy<ProjectionActivator> {
-        self.inner
-            .node
-            .projection_activator(|interval| WatcherSource::new(self.event_store(), interval))
-            .await
+    /// This system's projection activator, which runs from the system's
+    /// [`build`][EventSourceSystemBuilder::build] on.
+    pub(crate) fn projection_activator(&self) -> ProcessProxy<ProjectionActivator> {
+        self.inner.node.projection_activator().clone()
     }
 }
 
@@ -643,7 +629,7 @@ mod compile_fail_fixtures {
     /// let store = CustomStore::builder().eventstore(InMemoryEventStore::default()).build();
     /// let system = EventSourceSystem::builder(ps)
     ///     .with_persistence(PersistenceProvider::new(store))
-    ///     .build();
+    ///     .build().await;
     /// system.spawn_aggregate::<Counter>(AggregateId::new("counter")).await;
     /// # }
     /// ```

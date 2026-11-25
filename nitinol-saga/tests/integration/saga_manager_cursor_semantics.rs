@@ -336,7 +336,8 @@ async fn instance_handler_error_holds_the_shared_cursor() {
                 .saga_offsets(InMemoryOffsetStore::default())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let journal = system.persistence().event_store();
 
     let upstream_key = AggregateId::new("mgr-hold-orders");
@@ -379,7 +380,8 @@ async fn uncorrelated_event_advances_the_cursor() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
 
     let journal = system.persistence().event_store();
     let upstream_key = AggregateId::new("mgr-selective-orders");
@@ -428,7 +430,8 @@ async fn ended_instance_does_not_stall_the_shared_subscription() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
 
     let journal = system.persistence().event_store();
     let upstream_key = AggregateId::new("mgr-fanout-orders");

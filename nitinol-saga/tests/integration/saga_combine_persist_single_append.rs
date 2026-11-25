@@ -816,7 +816,8 @@ async fn fixture(stream: &str, sku: &str, saga_id: &str) -> Fixture {
                 .saga_offsets(InMemoryOffsetStore::default())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
 
     let order_id = AggregateId::new(stream);
     append_order_placed(&system.persistence().event_store(), &order_id, 1, sku).await;

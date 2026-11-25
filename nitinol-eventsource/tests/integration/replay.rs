@@ -210,6 +210,7 @@ async fn node_over<St: Store>(store: &St) -> EventSourceSystem<St> {
     EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(store.clone()))
         .build()
+        .await
 }
 
 /// A store holding both the journal and the snapshot slot a

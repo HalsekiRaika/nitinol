@@ -179,7 +179,8 @@ async fn wait_for_decisions(store: &Journal, saga_id: &SagaId, expected: usize) 
 async fn a_saga_without_apply_still_journals_its_decisions() {
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
     let journal = system.persistence().event_store();
 
     let upstream = AggregateId::new("apply-optional-upstream");
@@ -223,7 +224,8 @@ async fn a_saga_without_apply_still_journals_its_decisions() {
 async fn replay_over_a_saga_without_apply_adds_no_second_decision() {
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
     let journal = system.persistence().event_store();
 
     let upstream = AggregateId::new("apply-optional-replay-upstream");

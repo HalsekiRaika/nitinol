@@ -457,7 +457,8 @@ async fn at_least_once_failing_event_blocks_the_next_event() {
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let agg_id = AggregateId::new("alo-hold-agg");
     let projection_id = ProjectionId::new("alo-hold");
 
@@ -513,7 +514,8 @@ async fn at_least_once_next_event_waits_for_the_retry_to_succeed() {
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let agg_id = AggregateId::new("alo-retry-agg");
     let projection_id = ProjectionId::new("alo-retry");
 
@@ -578,7 +580,8 @@ async fn at_least_once_failed_event_survives_a_restart() {
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let agg_id = AggregateId::new("alo-restart-agg");
     let projection_id = ProjectionId::new("alo-restart");
 
@@ -670,7 +673,8 @@ async fn exactly_once_tx_project_failure_blocks_the_next_event() {
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let agg_id = AggregateId::new("eo-tx-project-agg");
     let projection_id = ProjectionId::new("eo-tx-project");
 
@@ -742,7 +746,8 @@ async fn exactly_once_tx_begin_failure_blocks_the_next_event() {
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let agg_id = AggregateId::new("eo-tx-begin-agg");
     let projection_id = ProjectionId::new("eo-tx-begin");
 
@@ -803,7 +808,8 @@ async fn exactly_once_tx_offset_save_failure_blocks_the_next_event() {
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let agg_id = AggregateId::new("eo-tx-save-agg");
     let projection_id = ProjectionId::new("eo-tx-save");
 
@@ -871,7 +877,8 @@ async fn exactly_once_tx_commit_failure_blocks_the_next_event() {
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let agg_id = AggregateId::new("eo-tx-commit-agg");
     let projection_id = ProjectionId::new("eo-tx-commit");
 
@@ -936,7 +943,8 @@ async fn at_most_once_failing_event_does_not_block_the_next_event() {
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let agg_id = AggregateId::new("amo-keep-agg");
     let projection_id = ProjectionId::new("amo-keep");
 
@@ -995,7 +1003,8 @@ async fn exactly_once_without_tx_project_failure_blocks_the_next_event() {
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let agg_id = AggregateId::new("eo-notx-agg");
     let projection_id = ProjectionId::new("eo-notx");
 
@@ -1052,7 +1061,8 @@ async fn projector_keeps_retrying_a_permanently_failing_event() {
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let agg_id = AggregateId::new("supervision-agg");
     let projection_id = ProjectionId::new("supervision");
 
@@ -1103,7 +1113,8 @@ async fn unregistered_event_type_does_not_block_the_next_event() {
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let agg_id = AggregateId::new("skip-agg");
     let projection_id = ProjectionId::new("skip");
 

@@ -251,6 +251,7 @@ async fn system() -> EventSourceSystem<InMemoryStore> {
     EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build()
+        .await
 }
 
 /// Wait until `proxy` has reserved at least one SKU, then answer what it holds.

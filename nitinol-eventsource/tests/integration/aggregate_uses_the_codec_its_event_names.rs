@@ -214,6 +214,7 @@ async fn system_over(store: Journal) -> EventSourceSystem<Journal> {
     EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(store))
         .build()
+        .await
 }
 
 /// Props with no codec step: `new` straight to `spawn`.
@@ -305,7 +306,8 @@ async fn two_event_types_on_one_system_each_use_their_own_codec() {
     let store = persistence.event_store();
     let system = EventSourceSystem::builder(ps)
         .with_persistence(persistence)
-        .build();
+        .build()
+        .await;
 
     let counter_id = AggregateId::new("named-codec-counter");
     let nameplate_id = AggregateId::new("named-codec-nameplate");

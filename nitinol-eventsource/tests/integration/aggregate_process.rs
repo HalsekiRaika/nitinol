@@ -133,6 +133,7 @@ async fn system_over(store: Journal) -> EventSourceSystem<Journal> {
     EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(store))
         .build()
+        .await
 }
 
 /// Spawns a Counter AggregateProcess on a system over a fresh `Journal`.

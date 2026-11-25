@@ -672,7 +672,8 @@ impl Incarnation {
                     .saga_offsets(InMemoryOffsetStore::default())
                     .build(),
             ))
-            .build();
+            .build()
+            .await;
         // One journal, and an upstream stream key of its own: a position this
         // incarnation records is keyed by the stream it read, so sharing one key
         // with an earlier incarnation would make its probes look already

@@ -208,6 +208,7 @@ async fn system_over(pool: &PgPool) -> EventSourceSystem<PostgresStore> {
     EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(store))
         .build()
+        .await
 }
 
 /// Start `id` on `system`.
