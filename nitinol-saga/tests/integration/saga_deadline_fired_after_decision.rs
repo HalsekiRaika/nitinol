@@ -414,6 +414,10 @@ impl EventStore for RejectingStore {
     async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
         self.inner.load(query).await
     }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
+    }
 }
 
 // Projections
@@ -668,7 +672,8 @@ impl Incarnation {
                     .saga_offsets(InMemoryOffsetStore::default())
                     .build(),
             ))
-            .build();
+            .build()
+            .await;
         // One journal, and an upstream stream key of its own: a position this
         // incarnation records is keyed by the stream it read, so sharing one key
         // with an earlier incarnation would make its probes look already

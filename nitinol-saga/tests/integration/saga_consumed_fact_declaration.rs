@@ -194,7 +194,8 @@ async fn run(
 ) -> Running {
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
     let saga_store = system.persistence().event_store();
 
     let upstream = AggregateId::new(upstream_key);

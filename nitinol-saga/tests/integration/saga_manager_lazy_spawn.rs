@@ -202,7 +202,8 @@ async fn unknown_correlation_id_lazy_spawns_and_delivers_after_replay() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
 
     // One journal: the upstream stream and each instance's own stream are
     // tenants of the store the system distributes.
@@ -247,7 +248,8 @@ async fn known_correlation_id_reuses_the_running_instance() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
 
     let journal = system.persistence().event_store();
     let upstream_key = AggregateId::new("mgr-lazy-reuse-orders");

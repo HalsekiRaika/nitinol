@@ -8,14 +8,13 @@ use nitinol_contract::Event;
 use nitinol_persistence::provider::ProjectionOffsetSlot;
 use nitinol_persistence::store::{DeliveryMode, OffsetScope, OffsetStore};
 use nitinol_persistence::AggregateId;
-use nitinol_runtime::process::ProcessProxy;
-use nitinol_runtime::{Props, SupervisionStrategy};
+use nitinol_runtime::IdleTimeout;
 
-use crate::durable_stream::{
-    DurableSubscription, SequenceCursor, DEFAULT_BATCH_LIMIT, DEFAULT_POLL_INTERVAL,
-};
+use crate::durable_stream::{DEFAULT_BATCH_LIMIT, DEFAULT_POLL_INTERVAL};
+use crate::projection::activator::{ProjectorDeclaration, Register};
+use crate::projection::handle::ProjectorHandle;
 use crate::projection::handler::{ConcreteHandler, EventTypeHandler};
-use crate::projection::process::{CatchupOrigin, ProjectorProcess};
+use crate::projection::process::CatchupOrigin;
 use crate::projection::projector::Projector;
 use crate::projection::tx_provider::{ErasedTxProvider, TxProvider};
 use crate::system::{EventSourceSystem, Hosted, Unhosted};
@@ -56,10 +55,11 @@ pub struct ProjectorProps<P, Tx = (), E = EventUnset, O = OriginUnset, H = Unhos
     delivery_mode: DeliveryMode,
     catchup_origin: O,
     tx_provider: Option<Arc<dyn ErasedTxProvider<Tx> + Send + Sync>>,
-    producer: Box<dyn Fn() -> P + Send + Sync>,
+    producer: Arc<dyn Fn() -> P + Send + Sync>,
     handlers: Vec<Arc<dyn EventTypeHandler<P, Tx>>>,
     poll_interval: Duration,
     batch_limit: NonZeroUsize,
+    idle_timeout: IdleTimeout,
     host: H,
     _phantom: PhantomData<E>,
 }
@@ -82,10 +82,11 @@ where
             delivery_mode: DeliveryMode::AtLeastOnce,
             catchup_origin: OriginUnset,
             tx_provider: None,
-            producer: Box::new(producer),
+            producer: Arc::new(producer),
             handlers: Vec::new(),
             poll_interval: DEFAULT_POLL_INTERVAL,
             batch_limit: DEFAULT_BATCH_LIMIT,
+            idle_timeout: IdleTimeout::Inherit,
             host: Unhosted,
             _phantom: PhantomData,
         }
@@ -112,6 +113,20 @@ impl<P, Tx, E, O, H> ProjectorProps<P, Tx, E, O, H> {
     /// that returns more than `limit` has all of it applied as one batch.
     pub fn with_batch_limit(mut self, limit: NonZeroUsize) -> Self {
         self.batch_limit = limit;
+        self
+    }
+
+    /// Stop the projector once it has been handed nothing for `idle_timeout`;
+    /// defaults to [`IdleTimeout::Inherit`], the system default.
+    ///
+    /// A stopped projector is passivated, not gone: the system's projection
+    /// activator starts it again — built anew from the producer, catching up
+    /// from its recorded offset — as soon as an event it follows is appended.
+    /// Whatever state the projector kept in memory is dropped when it stops,
+    /// so a projector whose read model lives in its own memory wants
+    /// [`IdleTimeout::Persistent`].
+    pub fn with_idle_timeout(mut self, idle_timeout: IdleTimeout) -> Self {
+        self.idle_timeout = idle_timeout;
         self
     }
 }
@@ -145,6 +160,7 @@ where
             handlers: Vec::new(),
             poll_interval: self.poll_interval,
             batch_limit: self.batch_limit,
+            idle_timeout: self.idle_timeout,
             host: self.host,
             _phantom: PhantomData,
         }
@@ -181,6 +197,7 @@ where
             handlers: self.handlers,
             poll_interval: self.poll_interval,
             batch_limit: self.batch_limit,
+            idle_timeout: self.idle_timeout,
             host: self.host,
             _phantom: PhantomData,
         }
@@ -220,6 +237,7 @@ where
             handlers: self.handlers,
             poll_interval: self.poll_interval,
             batch_limit: self.batch_limit,
+            idle_timeout: self.idle_timeout,
             host: self.host,
             _phantom: PhantomData,
         }
@@ -236,6 +254,7 @@ where
             handlers: self.handlers,
             poll_interval: self.poll_interval,
             batch_limit: self.batch_limit,
+            idle_timeout: self.idle_timeout,
             host: self.host,
             _phantom: PhantomData,
         }
@@ -247,79 +266,40 @@ where
     P: Send + Sync + 'static,
     Tx: Send + 'static,
 {
-    /// The one road both entry points take: start this projector on `system`,
-    /// from the position its slot records.
+    /// The one road both entry points take: register this projection with
+    /// `system`'s projection activator, which starts its projector from the
+    /// position its slot records.
     ///
-    /// The journal, the offset store and the process system are taken from
-    /// `system` here and nowhere else, so both forms start the same projector
-    /// from the same recorded position.
-    async fn start_on<St>(
-        self,
-        system: &EventSourceSystem<St>,
-    ) -> ProcessProxy<ProjectorProcess<P, St::ProjectionOffsets, Tx>>
+    /// The journal, the offset store and the activator are taken from
+    /// `system` here and nowhere else, so both forms register the same
+    /// projection and every activation of it starts from the same recorded
+    /// position.
+    async fn start_on<St>(self, system: &EventSourceSystem<St>) -> ProjectorHandle
     where
         St: ProjectionOffsetSlot,
         St::ProjectionOffsets: OffsetStore<Tx = Tx> + Send + Sync,
     {
-        let store = system.persistence().event_store();
-        let offset_store = system.persistence().projection_offsets();
-
-        let catchup_origin = self.catchup_origin.0;
-        let projection_id = self.projection_id;
-        let delivery_mode = self.delivery_mode;
-        let handlers = self.handlers;
-        let producer = self.producer;
-        let tx_provider = self.tx_provider;
-        let poll_interval = self.poll_interval;
-        let batch_limit = self.batch_limit;
-
-        // Built once here: the key this projector's position is filed under is
-        // the same for the load below and for every save it makes afterwards.
-        let offset_scope = OffsetScope::from(&projection_id);
-
-        let offset = offset_store
-            .load(&offset_scope)
-            .await
-            .expect("offset load must succeed before projector spawn")
-            .unwrap_or(0);
-
-        let cursor = match &catchup_origin {
-            CatchupOrigin::Aggregate(agg_id) => SequenceCursor::Stream {
-                key: agg_id.as_str().to_owned(),
-                after: offset,
-            },
-            CatchupOrigin::Global => SequenceCursor::Global { after: offset },
+        let projection_id = self.projection_id.clone();
+        let declaration = ProjectorDeclaration {
+            offset_scope: OffsetScope::from(&self.projection_id),
+            projection_id: self.projection_id,
+            journal: system.event_store(),
+            offset_store: system.persistence().projection_offsets(),
+            delivery_mode: self.delivery_mode,
+            catchup_origin: self.catchup_origin.0,
+            producer: self.producer,
+            handlers: self.handlers,
+            tx_provider: self.tx_provider,
+            poll_interval: self.poll_interval,
+            batch_limit: self.batch_limit,
+            idle_timeout: self.idle_timeout,
         };
 
-        let upstream_config = DurableSubscription::<nitinol_persistence::LoadedEvent>::new(Some)
-            .with_poll_interval(poll_interval);
-
-        let runtime_props = Props::new(move || ProjectorProcess {
-            projector: producer(),
-            projection_id: projection_id.clone(),
-            offset_scope: offset_scope.clone(),
-            store: store.clone(),
-            offset_store: offset_store.clone(),
-            delivery_mode,
-            catchup_origin: catchup_origin.clone(),
-            handlers: handlers.clone(),
-            tx_provider: tx_provider.clone(),
-            offset_sequence: offset,
-            upstream_config: upstream_config.clone(),
-            upstream_cursor: cursor.clone(),
-            batch_limit,
-        })
-        // An event the projector could not apply is reported by returning
-        // `Err`, which is also what supervision sees.  Under the runtime's
-        // default `Stop` the first such failure would take the projector down
-        // and cascade-stop its poller, so the event held for redelivery would
-        // never be polled again — the projection would be dead rather than
-        // waiting.  `Restart` is no better here: it rebuilds the projector from
-        // `producer()`, discarding the state a stateful projector accumulated
-        // and the offset it was restored with.
-        .with_supervision_strategy(SupervisionStrategy::Resume);
-
-        system.process_system().spawn(runtime_props).await
+        let activator = system.projection_activator();
+        activator.ask(Register(Box::new(declaration))).await.expect(
+            "the projection activator is persistent and resumes, so it answers every registration",
+        );
+        ProjectorHandle::new(projection_id, activator)
     }
 }
 
@@ -330,6 +310,13 @@ where
 {
     /// Spawn the projector on `system`, following the journal it distributes and
     /// recording its position in the projection slot its store holds.
+    ///
+    /// The projection is registered with the system's projection activator,
+    /// which starts the projector now and again whenever it has passivated and
+    /// an event it follows is appended. Spawning a projection id the system
+    /// already has registered joins it: no second projector is started, the
+    /// declaration first registered is kept, and the handle returned names the
+    /// same projection.
     ///
     /// Call [`with_event`][ProjectorProps::with_event] and one of the
     /// `catchup_from_*` methods before `spawn`. An incomplete builder, a store
@@ -350,7 +337,7 @@ where
     /// let ps = ProcessSystem::new().await;
     /// let system = EventSourceSystem::builder(ps)
     ///     .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-    ///     .build();
+    ///     .build().await;
     /// // compile error: spawn() requires EventSet — call with_event() first
     /// ProjectorProps::new(ProjectionId::new("p"), MyProj::new)
     ///     .spawn(&system)
@@ -360,12 +347,9 @@ where
     ///
     /// # Panics
     ///
-    /// Panics if the offset store fails to load the position recorded for this
-    /// projection.
-    pub async fn spawn<St>(
-        self,
-        system: &EventSourceSystem<St>,
-    ) -> ProcessProxy<ProjectorProcess<P, St::ProjectionOffsets, Tx>>
+    /// Panics if the system's projection activator has ended — which only the
+    /// process system shutting down does.
+    pub async fn spawn<St>(self, system: &EventSourceSystem<St>) -> ProjectorHandle
     where
         St: ProjectionOffsetSlot,
         St::ProjectionOffsets: OffsetStore<Tx = Tx> + Send + Sync,
@@ -389,9 +373,9 @@ where
     ///
     /// # Panics
     ///
-    /// Panics if the offset store fails to load the position recorded for this
-    /// projection.
-    pub async fn spawn(self) -> ProcessProxy<ProjectorProcess<P, St::ProjectionOffsets, Tx>> {
+    /// Panics if the system's projection activator has ended — which only the
+    /// process system shutting down does.
+    pub async fn spawn(self) -> ProjectorHandle {
         let host = self.host.system().clone();
         self.start_on(&host).await
     }
@@ -412,6 +396,7 @@ impl<P, Tx, E, O> ProjectorProps<P, Tx, E, O, Unhosted> {
             handlers: self.handlers,
             poll_interval: self.poll_interval,
             batch_limit: self.batch_limit,
+            idle_timeout: self.idle_timeout,
             host: Hosted::new(host),
             _phantom: PhantomData,
         }
@@ -453,7 +438,7 @@ mod compile_fail_fixtures {
     /// let ps = ProcessSystem::new().await;
     /// let system = EventSourceSystem::builder(ps)
     ///     .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-    ///     .build();
+    ///     .build().await;
     /// // compile error: spawn() requires OriginSet — call catchup_from_aggregate() or catchup_from_global() first
     /// ProjectorProps::new(ProjectionId::new("p"), MyProj::new)
     ///     .with_event::<MyEv>()
@@ -497,7 +482,7 @@ mod compile_fail_fixtures {
     /// let store = CustomStore::builder().eventstore(InMemoryEventStore::default()).build();
     /// let system = EventSourceSystem::builder(ps)
     ///     .with_persistence(PersistenceProvider::new(store))
-    ///     .build();
+    ///     .build().await;
     /// // compile error: unsatisfied trait bound — the store is not a `ProjectionOffsetSlot`
     /// ProjectorProps::new(ProjectionId::new("read-model"), || ReadModel)
     ///     .with_event::<MyEv>()
@@ -551,7 +536,7 @@ mod compile_fail_fixtures {
     /// // `InMemoryStore`'s projection offsets have `Tx = ()`, not `MyTx`
     /// let system = EventSourceSystem::builder(ps)
     ///     .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-    ///     .build();
+    ///     .build().await;
     /// // compile error: type mismatch — `spawn` requires the offset store's `Tx` to be `MyTx`
     /// ProjectorProps::new(ProjectionId::new("p"), || MyProj)
     ///     .with_tx_provider(MyTxProvider)

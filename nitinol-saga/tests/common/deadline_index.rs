@@ -231,6 +231,7 @@ pub async fn system_over(store: &InMemoryStore) -> EventSourceSystem<InMemorySto
     EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(store.clone()))
         .build()
+        .await
 }
 
 // Seeding a saga's own stream
@@ -574,6 +575,10 @@ impl EventStore for ProbeJournal {
         }
         loaded
     }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
+    }
 }
 
 pub type ProbeStore = CustomStore<Unprovided, Unprovided, InMemoryOffsetStore>;
@@ -588,6 +593,7 @@ pub async fn probe_system(journal: &ProbeJournal) -> EventSourceSystem<ProbeStor
                 .build(),
         ))
         .build()
+        .await
 }
 
 /// Wait until `probe` has seen at least `want` queries `select` accepts, and

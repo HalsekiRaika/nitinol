@@ -263,6 +263,10 @@ impl EventStore for ReplayRecorder {
             }
         })))
     }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
+    }
 }
 
 /// A snapshot store that refuses every save and holds nothing.
@@ -322,6 +326,10 @@ impl EventStore for FailFirstLoadStore {
         }
         self.inner.load(query).await
     }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
+    }
 }
 
 // Helpers
@@ -335,6 +343,7 @@ async fn system_over<St: Store>(store: St) -> EventSourceSystem<St> {
     EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(store))
         .build()
+        .await
 }
 
 /// The snapshot the system's persistor reads back for `id`.

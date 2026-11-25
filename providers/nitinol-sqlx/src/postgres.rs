@@ -1,5 +1,6 @@
 mod append;
 mod failure;
+mod head;
 mod load;
 mod numbering;
 mod offset;
@@ -97,5 +98,9 @@ impl EventStore for PostgresEventStore {
 
     async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
         load::load(&self.pool, self.event_types, query)
+    }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        head::head(&self.pool).await
     }
 }

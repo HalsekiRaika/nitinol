@@ -7,6 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- (`nitinol-eventsource`): `AggregateProps::with_idle_timeout` sets an
+  `IdleTimeout` on the activation these props start, overriding the system
+  default; a passivated aggregate is replayed by the next `ask`. `IdleTimeout`
+  is re-exported from `nitinol-eventsource` and `nitinol::eventsource`.
+- (`nitinol-eventsource`): a projection activator, one per `EventSourceSystem`
+  and started with it, keeps every projection spawned on
+  the system and starts its projector again when an event it follows is
+  appended, so a projector may passivate. Projectors stay top-level processes
+  that the activator watches, each reading its own offset as it starts.
+  Appends through the system's own journal wake a projector at once; appends
+  by other writers are found by a watcher that reads the journal every 10 s
+  from where it stood when the first projector was spawned, set with
+  `EventSourceSystemBuilder::with_projection_watcher_interval` or turned off
+  with `EventSourceSystemBuilder::without_projection_watcher`. The watcher
+  keeps no position in the offset store. `EventSourceSystem::event_store` is
+  the system's journal, observed by the activator.
+- (`nitinol-eventsource`): `ProjectorProps::with_idle_timeout` sets the idle
+  timeout a projector stops on; it defaults to the system default. A
+  passivated projector is rebuilt from its producer and catches up from its
+  offset.
+- (`nitinol-persistence`): `AppendObserver`, and `Journal::observed_by`, which
+  reports every append a journal accepts to an observer. The observer is
+  async and awaited inside the `append` call; it is told the stream `key`, the
+  `AppendOutcome` the backend assigned, and the event `types` in the order
+  appended — not the events, so an observed append does not copy its batch.
+- (`nitinol-runtime`): `ProcessState` and `ProcessProxy::state`, which reads
+  whether a process is `Starting`, `Running`, `Stopping` or `Stopped`.
+- (`nitinol-runtime`): `ProcessWaker`, `Driver::attach_waker` and
+  `ProcessContext::waker`. The lifecycle hands every process's driver its
+  waker, so a handler that calls `ctx.waker().wake()` has a driver that
+  honours it stop waiting and deliver its next event at once; drivers that do
+  not override `attach_waker` are unaffected.
+- (`nitinol-persistence`, `nitinol-sqlx`, `nitinol-store-conformance`):
+  `EventStore::head` and `Journal::head` answer the highest `global_sequence`
+  the store has assigned, or `None` if it has assigned none, under the clauses
+  `HEAD-1` and `HEAD-2`; `InMemoryEventStore` and `PostgresEventStore`
+  implement it, the latter off the existing global-order index, and
+  `verify_deterministic` checks both clauses. `head` is a required method with
+  no default implementation, so every `EventStore` implementor has to add it.
+
+### Changed
+
+- **BREAKING** (`nitinol-eventsource`): `EventSourceSystemBuilder::build` is
+  async: `.build().await` returns the `EventSourceSystem`. It starts the
+  system's projection activator, so the activator runs from the build rather
+  than from the first projector spawn.
+- (`nitinol-eventsource`): `ProjectorProps::spawn` returns a `ProjectorHandle`
+  instead of the projector process's `ProcessProxy`; `is_active` reports
+  whether a projector runs and `stop` takes the projection out of the system
+  and waits for its projector to end. Spawning a projection id the system
+  already has joins it rather than starting a second projector.
+- (`nitinol-eventsource`): `ProjectorProcess` is no longer public.
+- (`nitinol-eventsource`): `ProjectorProps::spawn` no longer panics when the
+  offset store fails to load the projection's offset; the projector loads it
+  again with each batch its poller reads, and projects nothing until a load
+  succeeds.
+
+### Fixed
+
+- (`nitinol-eventsource`): a projector stopped by the system default idle
+  timeout is no longer lost. Its poller hands it nothing on an empty read, so a
+  quiet journal looked like idleness and the projector died with nothing to
+  revive it; the projection activator now starts it again when an event it
+  follows is appended.
+- (`nitinol-eventsource`): an `AtMostOnce` projection whose offset save fails no
+  longer runs the batch's handlers; the batch is redelivered, so a projector
+  that stops and starts again does not handle the same event twice.
+- (`nitinol-runtime`): a process closes its mailbox as soon as it starts
+  stopping, so an `ask` waiting there returns `AskError::ReplyDropped` and a
+  later `tell` / `ask` goes to the dead letters. A child that asks its parent
+  from inside a handler no longer deadlocks the parent stopping and waiting
+  for it.
+
 ## [0.8.0] - 2026-11-17
 
 ### Changed

@@ -429,7 +429,8 @@ mod tests {
         let system: EventSourceSystem<InMemoryStore> =
             EventSourceSystem::builder(ProcessSystem::new().await)
                 .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-                .build();
+                .build()
+                .await;
         let id = AggregateId::new("proxy-pid-one-activation");
 
         let via_props = AggregateProps::<Counted>::new(id.clone())

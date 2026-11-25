@@ -15,7 +15,8 @@ use crate::process::dead_letter::{self, DeadLetterProxy};
 use crate::process::registry::ProcessRegistry;
 use crate::process::signal::SystemSignal;
 use crate::process::task::{AskTask, TellTask, UserTask};
-use crate::process::{Process, Receive};
+use crate::process::watch::SharedProcessState;
+use crate::process::{Process, ProcessState, Receive};
 
 /// A cloneable handle to a running process of type `P`.
 ///
@@ -28,6 +29,7 @@ pub struct ProcessProxy<P> {
     pub(crate) sys_tx: mpsc::Sender<SystemSignal>,
     pub(crate) dead_letter: Option<DeadLetterProxy>,
     pub(crate) registry: ProcessRegistry,
+    pub(crate) state: SharedProcessState,
 }
 
 impl<P> Clone for ProcessProxy<P> {
@@ -38,6 +40,7 @@ impl<P> Clone for ProcessProxy<P> {
             sys_tx: self.sys_tx.clone(),
             dead_letter: self.dead_letter.clone(),
             registry: self.registry.clone(),
+            state: self.state.clone(),
         }
     }
 }
@@ -56,6 +59,16 @@ impl<P: Process> ProcessProxy<P> {
         self.pid
     }
 
+    /// Returns where the process is in its lifecycle now.
+    ///
+    /// Every clone of this proxy reads the same state. Once it reads
+    /// [`ProcessState::Stopping`] or [`ProcessState::Stopped`], a
+    /// [`tell`](Self::tell) or [`ask`](Self::ask) to the process goes to the
+    /// dead letters.
+    pub fn state(&self) -> ProcessState {
+        self.state.load()
+    }
+
     async fn route_to_dead_letter(&self, task: UserTask<P>, suppress: bool) {
         if let Some(ref dl) = self.dead_letter {
             let envelope = task.into_dead_letter_envelope(self.pid, None, suppress);
@@ -67,8 +80,8 @@ impl<P: Process> ProcessProxy<P> {
     ///
     /// # Errors
     ///
-    /// Returns [`SendError`] if the process has stopped and its mailbox is
-    /// closed. The message is sent to the dead letters.
+    /// Returns [`SendError`] if the process is stopping or stopped, so its
+    /// mailbox is closed. The message is sent to the dead letters.
     pub async fn tell<M>(&self, msg: M) -> Result<(), SendError>
     where
         P: Receive<M>,
@@ -89,11 +102,12 @@ impl<P: Process> ProcessProxy<P> {
     ///
     /// # Errors
     ///
-    /// - [`AskError::DeadLetter`] if the process stopped before the message
-    ///   was delivered.
+    /// - [`AskError::DeadLetter`] if the process is stopping or stopped, so
+    ///   the message was not delivered.
     /// - [`AskError::Handler`] if the handler returned `Err`.
-    /// - [`AskError::ReplyDropped`] if the process stopped, restarted or
-    ///   panicked before replying, or its stash was full.
+    /// - [`AskError::ReplyDropped`] if the process started stopping while the
+    ///   message waited in its mailbox, restarted or panicked before replying,
+    ///   or its stash was full.
     pub async fn ask<M>(
         &self,
         msg: M,
@@ -126,11 +140,12 @@ impl<P: Process> ProcessProxy<P> {
     /// # Errors
     ///
     /// - [`AskError::Timeout`] if no reply arrives within `duration`.
-    /// - [`AskError::DeadLetter`] if the process stopped before the message
-    ///   was delivered.
+    /// - [`AskError::DeadLetter`] if the process is stopping or stopped, so
+    ///   the message was not delivered.
     /// - [`AskError::Handler`] if the handler returned `Err`.
-    /// - [`AskError::ReplyDropped`] if the process stopped, restarted or
-    ///   panicked before replying, or its stash was full.
+    /// - [`AskError::ReplyDropped`] if the process started stopping while the
+    ///   message waited in its mailbox, restarted or panicked before replying,
+    ///   or its stash was full.
     pub async fn ask_with_timeout<M>(
         &self,
         msg: M,

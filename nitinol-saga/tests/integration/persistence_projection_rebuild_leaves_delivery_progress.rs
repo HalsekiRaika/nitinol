@@ -138,7 +138,8 @@ async fn rebuilding_the_projection_slot_leaves_the_delivery_position_where_it_wa
                 .offsets(shared_offsets.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
 
     let first_applied = Arc::new(AtomicUsize::new(0));
     let first_notify = Arc::new(Notify::new());
@@ -210,7 +211,8 @@ async fn rebuilding_the_projection_slot_leaves_the_delivery_position_where_it_wa
                 .saga_offsets(shared_offsets.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
 
     let rebuilt_applied = Arc::new(AtomicUsize::new(0));
     let rebuilt_notify = Arc::new(Notify::new());

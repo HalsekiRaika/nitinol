@@ -208,7 +208,8 @@ async fn wait_for_count(captured: &Arc<Mutex<Vec<String>>>, notify: &Arc<Notify>
 async fn saga_catches_up_on_preexisting_upstream_events() {
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
     let journal = system.persistence().event_store();
     let order_id = AggregateId::new("saga-upstream-catchup-order");
 
@@ -247,7 +248,8 @@ async fn saga_catches_up_on_preexisting_upstream_events() {
 async fn saga_catchup_declines_events_that_correlate_elsewhere() {
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
     let journal = system.persistence().event_store();
     let order_id = AggregateId::new("saga-upstream-route-order");
 
@@ -289,7 +291,8 @@ async fn saga_catchup_declines_events_that_correlate_elsewhere() {
 async fn saga_catchup_resumes_from_cursor_after_value() {
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
     let journal = system.persistence().event_store();
     let order_id = AggregateId::new("saga-upstream-resume-order");
 
@@ -329,7 +332,8 @@ async fn saga_catchup_resumes_from_cursor_after_value() {
 async fn saga_receives_live_events_after_catchup_via_durable_stream() {
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
     let journal = system.persistence().event_store();
     let order_id = AggregateId::new("saga-upstream-live-order");
 
@@ -368,7 +372,8 @@ async fn saga_receives_live_events_after_catchup_via_durable_stream() {
 async fn saga_catchup_ignores_events_of_other_types() {
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
     let journal = system.persistence().event_store();
     let order_id = AggregateId::new("saga-upstream-mixed-order");
 
@@ -417,7 +422,8 @@ async fn saga_catchup_ignores_events_of_other_types() {
 async fn saga_catchup_with_global_cursor_orders_across_aggregates() {
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
     let journal = system.persistence().event_store();
 
     let agg_a = AggregateId::new("saga-upstream-global-a");

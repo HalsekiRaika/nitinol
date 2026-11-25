@@ -182,6 +182,7 @@ async fn system_over(journal: RecordingStore) -> EventSourceSystem<ReplayStore> 
                 .build(),
         ))
         .build()
+        .await
 }
 
 #[async_trait]
@@ -210,6 +211,10 @@ impl EventStore for RecordingStore {
 
     async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
         self.inner.load(query).await
+    }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
     }
 }
 

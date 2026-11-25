@@ -425,7 +425,8 @@ async fn a_registered_and_a_fired_timer_are_reported_with_distinct_arms() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
 
     // One journal: the upstream stream the saga observes and the saga's own
     // stream are tenants of the store the system distributes.
@@ -503,7 +504,8 @@ async fn the_position_a_batch_consumed_is_reported_with_its_own_arm() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
 
     let journal = system.persistence().event_store();
     append_ping(&journal, POSITION_UPSTREAM_KEY, 1, "note").await;
@@ -592,7 +594,8 @@ async fn a_terminated_saga_reports_the_ended_lifecycle_fact() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
 
     let journal = system.persistence().event_store();
     append_ping(&journal, "tracing-lifecycle-upstream", 1, "last").await;
@@ -653,7 +656,8 @@ async fn a_user_event_is_not_reported_as_a_framework_record() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
 
     let journal = system.persistence().event_store();
     append_ping(&journal, "tracing-domain-upstream", 1, "note").await;

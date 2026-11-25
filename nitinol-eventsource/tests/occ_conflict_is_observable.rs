@@ -195,6 +195,10 @@ impl EventStore for AppendFailsWithBackendError {
     async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
         self.inner.load(query).await
     }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
+    }
 }
 
 // Fixtures: capturing the crate's tracing records
@@ -311,7 +315,8 @@ async fn spawn_writer(
 ) -> AggregateProxy<Counter> {
     let system = EventSourceSystem::builder(ps.clone())
         .with_persistence(PersistenceProvider::new(store.clone()))
-        .build();
+        .build()
+        .await;
     AggregateProps::<Counter>::new(id.clone())
         .spawn(&system)
         .await

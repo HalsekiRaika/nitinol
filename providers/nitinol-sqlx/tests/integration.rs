@@ -4,11 +4,15 @@
 mod fixture;
 #[path = "common/harness.rs"]
 mod harness;
+#[path = "common/statistics.rs"]
+mod statistics;
 
 #[path = "integration/exactly_once_projection.rs"]
 mod exactly_once_projection;
 #[path = "integration/journal_event_type_index.rs"]
 mod journal_event_type_index;
+#[path = "integration/journal_head.rs"]
+mod journal_head;
 #[path = "integration/load_query.rs"]
 mod load_query;
 #[path = "integration/load_query_conjunction.rs"]

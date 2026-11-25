@@ -3,7 +3,8 @@
 //! ```gherkin
 //! Scenario: the provider keeps every OCC clause
 //!   Given a Postgres this run has reached
-//!   When the conformance suite's OCC-1 … OCC-5 verification is run against it
+//!   When the conformance suite's OCC-1 … OCC-5, HEAD-1 and HEAD-2 verification is run
+//!        against it
 //!   Then every clause holds
 //!
 //! Scenario: an offset reader misses nothing under concurrent appends

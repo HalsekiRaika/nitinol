@@ -67,7 +67,7 @@
 //! # async fn main() {
 //! # let system = EventSourceSystem::builder(ProcessSystem::new().await)
 //! #     .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-//! #     .build();
+//! #     .build().await;
 //! # let order_id = AggregateId::new("order-1");
 //! let _saga = system
 //!     .host::<ReservationSaga>(|_| ReservationSaga)

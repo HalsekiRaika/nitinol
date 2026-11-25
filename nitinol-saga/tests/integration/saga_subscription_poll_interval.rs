@@ -138,6 +138,10 @@ impl EventStore for SourcePollRecorder {
         }
         self.inner.load(query).await
     }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
+    }
 }
 
 /// The store the observer's system is built over: the recording journal, plus
@@ -167,7 +171,8 @@ async fn observe(interval: Option<Duration>) -> Observer {
                 .saga_offsets(InMemoryOffsetStore::default())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
 
     let key = AggregateId::new(UPSTREAM_KEY);
     let subscription = Subscription::stream(&key);

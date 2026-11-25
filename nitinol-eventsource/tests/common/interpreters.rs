@@ -169,7 +169,8 @@ impl Interpretation for ActivationInterpretation {
             // when it interprets one ledger twice.
             let system = EventSourceSystem::builder(self.process_system.clone())
                 .with_persistence(PersistenceProvider::new(store))
-                .build();
+                .build()
+                .await;
             let proxy = AggregateProps::<Ledger>::new(ledger.clone())
                 .spawn(&system)
                 .await;

@@ -263,7 +263,8 @@ async fn spawn_aggregate_persists_onto_the_suppliers_event_store() {
     let events = InMemoryEventStore::default();
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(journal_only(&events)))
-        .build();
+        .build()
+        .await;
     let id = AggregateId::new("system-persistence-spawn-aggregate");
 
     // When
@@ -288,7 +289,8 @@ async fn aggregate_props_persists_onto_the_suppliers_event_store() {
     let events = InMemoryEventStore::default();
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(journal_only(&events)))
-        .build();
+        .build()
+        .await;
     let id = AggregateId::new("system-persistence-aggregate-props");
 
     // When
@@ -312,7 +314,8 @@ async fn aggregate_proxy_persists_onto_the_suppliers_event_store() {
     let events = InMemoryEventStore::default();
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(journal_only(&events)))
-        .build();
+        .build()
+        .await;
     let id = AggregateId::new("system-persistence-aggregate-proxy");
 
     // When
@@ -339,7 +342,8 @@ async fn the_supplier_the_system_carries_is_the_one_its_spawns_resolve() {
     let events = InMemoryEventStore::default();
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(journal_only(&events)))
-        .build();
+        .build()
+        .await;
     let id = AggregateId::new("system-persistence-accessor");
 
     // When
@@ -371,7 +375,8 @@ async fn the_systems_snapshot_persistor_writes_to_the_suppliers_snapshot_store()
                 .snapshot(snapshots.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let id = AggregateId::new("system-persistence-snapshot");
 
     // When
@@ -402,7 +407,8 @@ async fn a_system_and_its_clone_hand_back_one_snapshot_persistor() {
     let store = InMemoryStore::default();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(store.clone()))
-        .build();
+        .build()
+        .await;
     let handle = system.clone();
     let id = AggregateId::new("system-persistence-snapshot-shared");
 
@@ -460,7 +466,8 @@ async fn a_persistor_of_a_second_system_reaches_the_same_snapshot_store() {
     );
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(provider.clone())
-        .build();
+        .build()
+        .await;
     let id = AggregateId::new("system-persistence-snapshot-both-ways");
 
     // When: the save goes through the persistor of a second system over the
@@ -468,6 +475,7 @@ async fn a_persistor_of_a_second_system_reaches_the_same_snapshot_store() {
     let directly = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(provider.clone())
         .build()
+        .await
         .snapshot_persistor()
         .await;
     directly
@@ -507,7 +515,8 @@ async fn the_systems_projector_follows_the_suppliers_event_store_and_projection_
                 .projection_offsets(projection_offsets.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let id = AggregateId::new("system-persistence-projection");
     let projection = ProjectionId::new("system-persistence-projection-read-model");
 
@@ -563,7 +572,8 @@ async fn projector_props_resolves_both_slots_from_the_system_it_is_spawned_on() 
     let store = InMemoryStore::default();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(store.clone()))
-        .build();
+        .build()
+        .await;
     let id = AggregateId::new("system-persistence-projector-props");
     let projection = ProjectionId::new("system-persistence-projector-props-read-model");
 
@@ -616,7 +626,8 @@ async fn the_contingent_system_reaches_the_journal_the_system_was_built_on() {
     let store = InMemoryStore::default();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(store.clone()))
-        .build();
+        .build()
+        .await;
     let id = AggregateId::new("system-persistence-contingent");
 
     // When: the aggregate is spawned on the original system, and the system is

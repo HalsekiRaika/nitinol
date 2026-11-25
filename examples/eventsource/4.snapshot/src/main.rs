@@ -49,7 +49,8 @@ async fn main() {
 
     let writer = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(store.clone()))
-        .build();
+        .build()
+        .await;
 
     let id = AggregateId::new("snap-counter");
 
@@ -81,7 +82,8 @@ async fn main() {
     // like, and the only way to watch a recovery from inside one process.
     let reader = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(store))
-        .build();
+        .build()
+        .await;
 
     let recovered = reader.spawn_aggregate::<Counter>(id).await;
 

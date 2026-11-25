@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 use crate::error::{SendError, StashError};
 use crate::ident::{Pid, ProcessName};
 use crate::process::dead_letter::DeadLetterProxy;
-use crate::process::driver::{PipeHandle, PipePanic, PipedTask, StashHandle};
+use crate::process::driver::{PipeHandle, PipePanic, PipedTask, ProcessWaker, StashHandle};
 use crate::process::pid_set::PidSet;
 use crate::process::props::{MailboxCapacity, PipeCapacity, StashCapacity};
 use crate::process::proxy::ProcessProxy;
@@ -37,6 +37,7 @@ pub struct ProcessContext<P: Process> {
     pub(crate) self_proxy: ProcessProxy<P>,
     pub(crate) pipe_handle: Option<PipeHandle<P>>,
     pub(crate) stash_handle: Option<StashHandle<P>>,
+    pub(crate) waker: ProcessWaker,
     pub(crate) pending_reply: Option<Box<dyn Any + Send + Sync>>,
     pub(crate) parent: Option<Pid>,
     pub(crate) children: PidSet,
@@ -107,6 +108,17 @@ impl<P: Process> ProcessContext<P> {
     /// captures the proxy to schedule a follow-up `tell` to itself).
     pub fn self_proxy(&self) -> &ProcessProxy<P> {
         &self.self_proxy
+    }
+
+    /// This process's waker: the one its driver was handed through
+    /// [`Driver::attach_waker`](crate::process::Driver::attach_waker).
+    ///
+    /// A handler calls `ctx.waker().wake()` to have its own driver stop
+    /// waiting — a tick driver that honours the waker then ticks at once
+    /// instead of waiting out its interval. A driver that does not honour it
+    /// is unaffected.
+    pub fn waker(&self) -> &ProcessWaker {
+        &self.waker
     }
 
     /// Starts `spawnable` as a child of this process.

@@ -96,6 +96,7 @@ where
     EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(delivery_persistence(journal, offsets))
         .build()
+        .await
 }
 
 /// The declared source, bound to a stream nothing is ever appended to.
@@ -156,6 +157,10 @@ impl EventStore for SourceTimeline {
             self.loads.lock().expect(FIXTURE_LOCK).push(Instant::now());
         }
         self.inner.load(query).await
+    }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
     }
 }
 

@@ -114,7 +114,8 @@ async fn synchronously_built_reference_addresses_the_same_aggregate() {
     let store = persistence.event_store();
     let system = EventSourceSystem::builder(ps)
         .with_persistence(persistence)
-        .build();
+        .build()
+        .await;
     let id = AggregateId::new("sync-entry-shared");
 
     // A non-async closure: this compiles only while the entry point is synchronous.

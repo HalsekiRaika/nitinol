@@ -141,7 +141,7 @@ use nitinol_contract::Aggregate;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ident::Pid;
 use nitinol_runtime::process::ProcessProxy;
-use nitinol_runtime::{ProcessSystem, Props, SupervisionStrategy};
+use nitinol_runtime::{IdleTimeout, ProcessSystem, Props, SupervisionStrategy};
 use tokio::sync::watch;
 
 use crate::error::MissingSnapshotSlot;
@@ -155,17 +155,42 @@ use crate::process::aggregate_process::AggregateProcess;
 /// reference above it exists to hide.
 pub(crate) type Incarnation<A> = ProcessProxy<AggregateProcess<A>>;
 
-/// Builds the process one activation runs.
+/// Builds the process one activation runs, and names the idle timeout it runs
+/// under.
 ///
 /// Held rather than consumed, because a reference outlives the activation it
 /// resolved and must be able to start another one (R-5).
-pub(crate) type Activation<A> = Arc<dyn Fn() -> AggregateProcess<A> + Send + Sync>;
+pub(crate) struct Activation<A: Aggregate> {
+    make: Arc<dyn Fn() -> AggregateProcess<A> + Send + Sync>,
+    idle_timeout: IdleTimeout,
+}
+
+impl<A: Aggregate> Clone for Activation<A> {
+    fn clone(&self) -> Self {
+        Self {
+            make: Arc::clone(&self.make),
+            idle_timeout: self.idle_timeout,
+        }
+    }
+}
+
+impl<A: Aggregate> Activation<A> {
+    pub(crate) fn new(
+        make: impl Fn() -> AggregateProcess<A> + Send + Sync + 'static,
+        idle_timeout: IdleTimeout,
+    ) -> Self {
+        Self {
+            make: Arc::new(make),
+            idle_timeout,
+        }
+    }
+}
 
 /// The runtime declaration every activation of an aggregate is spawned under.
 ///
-/// The sole owner of that declaration, so that the reference which re-resolves
-/// after a death starts an activation identical to the one an explicit spawn
-/// starts.
+/// The sole owner of that declaration, idle timeout included, so that the
+/// reference which re-resolves after a death — a passivation among them —
+/// starts an activation identical to the one an explicit spawn starts.
 ///
 /// # Why `Resume` rather than the runtime's default `Stop`
 ///
@@ -180,7 +205,10 @@ pub(crate) type Activation<A> = Arc<dyn Fn() -> AggregateProcess<A> + Send + Syn
 pub(crate) fn activation_props<A: Aggregate>(
     activation: Activation<A>,
 ) -> Props<AggregateProcess<A>> {
-    Props::new(move || activation()).with_supervision_strategy(SupervisionStrategy::Resume)
+    let Activation { make, idle_timeout } = activation;
+    Props::new(move || make())
+        .with_supervision_strategy(SupervisionStrategy::Resume)
+        .with_idle_timeout(idle_timeout)
 }
 
 /// The identity a reference resolves by: the aggregate type and its stream key.
@@ -473,7 +501,7 @@ impl<A: Aggregate> AggregateResolver<A> {
     async fn activate(&self, activation: &Activation<A>) -> Incarnation<A> {
         self.handle
             .system
-            .spawn(activation_props(Arc::clone(activation)))
+            .spawn(activation_props(activation.clone()))
             .await
     }
 

@@ -1927,6 +1927,7 @@ dependencies = [
  "jiff",
  "linkme",
  "nitinol-contract",
+ "smallvec",
  "thiserror",
  "tokio",
 ]

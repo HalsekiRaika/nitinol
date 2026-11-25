@@ -1,8 +1,10 @@
 //! Projectors that build read models from stored events.
 
+pub(crate) mod activator;
 mod context;
 mod delivery;
 mod envelope;
+mod handle;
 mod handler;
 mod id;
 mod process;
@@ -12,6 +14,7 @@ pub(crate) mod tx_provider;
 
 pub use context::ProjectionContext;
 pub use envelope::EventEnvelope;
+pub use handle::ProjectorHandle;
 pub use id::ProjectionId;
 pub use projector::Projector;
 pub use props::{EventSet, EventUnset, OriginSet, OriginUnset, ProjectorProps};

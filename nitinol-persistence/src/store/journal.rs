@@ -2,8 +2,11 @@
 //! signature.
 
 use std::fmt;
+use std::sync::Arc;
 
-use nitinol_contract::Event;
+use async_trait::async_trait;
+use nitinol_contract::{Event, EventType};
+use smallvec::SmallVec;
 
 use crate::error::{AppendError, LoadError};
 use crate::event::AppendingEvent;
@@ -42,13 +45,58 @@ use crate::store::typed_load::{TypedEventStream, TypedLoad};
 /// // a journal is a handle onto an event store, not an event store
 /// takes(&journal);
 /// ```
-pub struct Journal(Box<dyn EventStore>);
+pub struct Journal {
+    store: Box<dyn EventStore>,
+    observer: Option<Arc<dyn AppendObserver>>,
+}
+
+/// Told about every append a [`Journal`] observed by it handed back as
+/// accepted.
+///
+/// [`appended`](AppendObserver::appended) is called once per accepted append,
+/// after the backend answered `Ok` and before the journal returns that answer,
+/// with the key the append was made with, the outcome the backend assigned,
+/// and the type of each appended event. A refused append is never reported, so
+/// whatever an observer is told about is already in the journal for a reader to
+/// load.
+///
+/// It is awaited on the appender's task, inside its `append` call: the
+/// appender waits until the observer returns. So an observer does no I/O and
+/// returns promptly — it hands the fact on and returns.
+#[async_trait]
+pub trait AppendObserver: Send + Sync {
+    /// The append to the stream `key` was accepted as `outcome`; `types` is
+    /// the type of each of its events, in the order appended, repeats kept.
+    async fn appended(&self, key: &str, outcome: &AppendOutcome, types: &[EventType]);
+}
+
+/// How many event types an observed append reports without allocating.
+///
+/// An aggregate's command usually emits a handful of events, so a batch larger
+/// than this is the exception and pays one allocation for it.
+const REPORTED_TYPES_INLINE: usize = 8;
 
 impl Journal {
+    /// This journal, with every append it accepts reported to `observer`.
+    ///
+    /// The observer replaces any the journal already had, and travels with
+    /// every [`Clone`] of the journal returned, so an append made through a
+    /// clone is reported too. A journal taken from a store with
+    /// [`From`] has no observer, and its appends are reported to nobody.
+    #[must_use]
+    pub fn observed_by(self, observer: Arc<dyn AppendObserver>) -> Journal {
+        Journal {
+            store: self.store,
+            observer: Some(observer),
+        }
+    }
+
     /// Appends `events` to the stream identified by `key`.
     ///
     /// [`EventStore::append`]'s clauses, unchanged: this hands the call to the
-    /// registered store and its answer back.
+    /// registered store and its answer back. If the journal is
+    /// [observed](Journal::observed_by), an accepted append is reported to the
+    /// observer, and the observer awaited, before its answer is returned.
     ///
     /// # Errors
     ///
@@ -62,7 +110,16 @@ impl Journal {
         key: &str,
         events: Vec<AppendingEvent>,
     ) -> Result<AppendOutcome, AppendError> {
-        self.0.append(key, events).await
+        let Some(observer) = &self.observer else {
+            return self.store.append(key, events).await;
+        };
+        // The backend takes the batch by value, so the types the observer is
+        // told about are taken before it is handed over.
+        let types: SmallVec<[EventType; REPORTED_TYPES_INLINE]> =
+            events.iter().map(|event| event.event_type).collect();
+        let outcome = self.store.append(key, events).await?;
+        observer.appended(key, &outcome, &types).await;
+        Ok(outcome)
     }
 
     /// Serves the stored events a [`LoadQuery`] selects.
@@ -74,7 +131,20 @@ impl Journal {
     /// Returns [`LoadError::Backend`] if the registered store fails to serve
     /// the query.
     pub async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
-        self.0.load(query).await
+        self.store.load(query).await
+    }
+
+    /// The highest `global_sequence` the registered store has assigned, or
+    /// `None` if it has assigned none.
+    ///
+    /// [`EventStore::head`]'s clauses, unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LoadError::Backend`] if the registered store fails to answer
+    /// where the journal ends.
+    pub async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.store.head().await
     }
 }
 
@@ -85,13 +155,16 @@ impl TypedLoad for Journal {
         &self,
         query: LoadQuery<Typed<E>>,
     ) -> Result<TypedEventStream<'_, E>, LoadError> {
-        self.0.read(query).await
+        self.store.read(query).await
     }
 }
 
 impl Clone for Journal {
     fn clone(&self) -> Self {
-        Self(self.0.clone_box())
+        Self {
+            store: self.store.clone_box(),
+            observer: self.observer.clone(),
+        }
     }
 }
 
@@ -103,7 +176,10 @@ impl fmt::Debug for Journal {
 
 impl<E: EventStore + 'static> From<E> for Journal {
     fn from(store: E) -> Self {
-        Self(Box::new(store))
+        Self {
+            store: Box::new(store),
+            observer: None,
+        }
     }
 }
 

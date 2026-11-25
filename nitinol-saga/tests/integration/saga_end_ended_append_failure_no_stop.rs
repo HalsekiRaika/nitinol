@@ -149,6 +149,10 @@ impl EventStore for AppendRefusingStore {
     async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
         self.inner.load(query).await
     }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
+    }
 }
 
 // Helpers
@@ -188,7 +192,8 @@ async fn saga_stays_alive_when_ended_append_fails() {
                 .saga_offsets(InMemoryOffsetStore::default())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
 
     let order_id = AggregateId::new("ended-fail-order");
 

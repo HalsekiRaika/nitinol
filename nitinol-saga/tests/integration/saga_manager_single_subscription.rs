@@ -189,7 +189,8 @@ async fn upstream_decode_happens_once_per_event_regardless_of_instance_count() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
 
     // One journal: the upstream stream and every instance's own stream are
     // tenants of the store the system distributes.

@@ -83,7 +83,8 @@ async fn main() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
 
     let id_a = AggregateId::new("comm-a");
     let id_b = AggregateId::new("comm-b");

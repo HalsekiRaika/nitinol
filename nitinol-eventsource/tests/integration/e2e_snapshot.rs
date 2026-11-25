@@ -170,6 +170,7 @@ async fn system_over<St: Store>(store: St) -> EventSourceSystem<St> {
     EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(store))
         .build()
+        .await
 }
 
 /// Spawn a Counter (Snapshotable) on `system`, which supplies both the journal

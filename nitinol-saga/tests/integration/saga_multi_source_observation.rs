@@ -210,6 +210,10 @@ impl EventStore for QueryRecordingStore {
             .push(query.clone());
         self.inner.load(query).await
     }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
+    }
 }
 
 // Helpers
@@ -317,7 +321,8 @@ fn as_set(seen: &[Seen]) -> Vec<Seen> {
 async fn both_declared_sources_reach_the_same_instance_as_their_own_variant() {
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
     let journal = system.persistence().event_store();
 
     let order_stream = AggregateId::new("multi-source-orders");
@@ -395,7 +400,8 @@ async fn each_declared_source_is_polled_through_a_subscription_of_its_own() {
                 .saga_offsets(InMemoryOffsetStore::default())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let journal = system.persistence().event_store();
 
     let order_stream = AggregateId::new("per-source-orders");

@@ -2,7 +2,7 @@ use nitinol_contract::Aggregate;
 use nitinol_persistence::provider::Store;
 use nitinol_persistence::store::{Album, Journal};
 use nitinol_persistence::AggregateId;
-use nitinol_runtime::ProcessSystem;
+use nitinol_runtime::{IdleTimeout, ProcessSystem};
 
 use super::{Node, SnapshotSource};
 use crate::process::props::resolving_reference;
@@ -99,6 +99,7 @@ impl ContingentSystem {
             self.node.resolve_handle(),
             self.event_store(),
             <A::Recover as RecoverOnContingent<A>>::recovery(self),
+            IdleTimeout::Inherit,
         )
     }
 

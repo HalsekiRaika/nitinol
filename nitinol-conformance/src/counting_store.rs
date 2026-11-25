@@ -61,4 +61,8 @@ impl EventStore for CountingStore {
     async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
         self.backing.load(query).await
     }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.backing.head().await
+    }
 }

@@ -71,7 +71,7 @@
 //! let ps = ProcessSystem::new().await;
 //! let system = EventSourceSystem::builder(ps)
 //!     .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-//!     .build();
+//!     .build().await;
 //!
 //! let counter: AggregateProxy<Counter> =
 //!     system.spawn_aggregate(AggregateId::new("counter-1")).await;
@@ -87,6 +87,23 @@
 //! 3. `eventsource-projection` – aggregate and projector (Catch-up and Live)
 //! 4. `eventsource-snapshot` – snapshot-accelerated replay
 //! 5. `eventsource-aggregate-communication` – inter-aggregate messaging, as a saga
+//!
+//! # Passivation
+//!
+//! An activation that receives nothing for its idle timeout stops, and its
+//! [`AggregateProxy`] replays the stream into a fresh one on a later `ask`; the
+//! first dispatch to reach the stopped activation may answer a transient
+//! [`AskError::Send`], which [`AggregateProxy::ask_with_retry`] absorbs.
+//! [`AggregateProps::with_idle_timeout`] sets that timeout per process,
+//! overriding the system default.
+//!
+//! A projector passivates the same way, under
+//! [`ProjectorProps::with_idle_timeout`]. The system's projection activator
+//! starts it again when an event it follows is appended: at once for an append
+//! through the system's own journal, and within the projection watcher's
+//! interval for one by another writer to the same store. The watcher reads
+//! from the journal's end as the first projector was spawned; what was written
+//! before is read by each projector's own catch-up from its recorded offset.
 //!
 //! # Observing lost races
 //!
@@ -169,6 +186,9 @@ pub use self::process::{
 };
 pub use self::process::{SnapshotPersistor, SnapshotPersistorProxy};
 pub use self::retry_policy::RetryPolicy;
+// The runtime's type, named by `AggregateProps::with_idle_timeout`; re-exported
+// so that call is writable without a direct dependency on `nitinol-runtime`.
+pub use nitinol_runtime::IdleTimeout;
 
 // The value an activation of a `Recover = Latest` aggregate carries. It appears
 // in the signatures of `RecoverOn` and `RecoverOnContingent`, so it is public
@@ -182,7 +202,7 @@ pub mod test_helpers;
 
 pub use self::projection::{
     EventEnvelope, EventSet, EventUnset, OriginSet, OriginUnset, ProjectionContext, ProjectionId,
-    Projector, ProjectorProps, TxProvider,
+    Projector, ProjectorHandle, ProjectorProps, TxProvider,
 };
 
 pub use self::durable_stream::{
@@ -190,8 +210,9 @@ pub use self::durable_stream::{
     DEFAULT_BATCH_LIMIT, DEFAULT_POLL_INTERVAL,
 };
 
-// The message a projector's poller hands it and the answer it reads back. They
-// appear in `ProjectorProcess`'s `Receive` impl, so they are public for that
-// bound to be nameable, and hidden because nothing outside this crate sends one.
+// The message a poller hands what it reads for and the answer it reads back.
+// Hidden because nothing outside this crate sends one; still public because
+// they were nameable at this path, and taking a public path away is a breaking
+// change of its own.
 #[doc(hidden)]
 pub use self::durable_stream::{PolledBatch, SettledThrough};

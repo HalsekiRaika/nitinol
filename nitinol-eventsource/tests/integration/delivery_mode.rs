@@ -176,7 +176,8 @@ async fn at_most_once_offset_advanced_even_when_project_fails() {
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let agg_id = AggregateId::new("dm-amo-agg");
     let projection_id = ProjectionId::new("dm-amo");
 
@@ -234,7 +235,8 @@ async fn at_most_once_offset_advanced_on_success() {
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let agg_id = AggregateId::new("dm-amo-ok-agg");
     let projection_id = ProjectionId::new("dm-amo-ok");
 
@@ -287,7 +289,8 @@ async fn at_least_once_offset_not_saved_when_project_fails() {
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let agg_id = AggregateId::new("dm-alo-fail-agg");
     let projection_id = ProjectionId::new("dm-alo-fail");
 
@@ -347,7 +350,8 @@ async fn at_least_once_offset_saved_after_successful_project() {
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let agg_id = AggregateId::new("dm-alo-ok-agg");
     let projection_id = ProjectionId::new("dm-alo-ok");
 
@@ -401,7 +405,8 @@ async fn at_least_once_failed_event_is_reprocessed_after_restart() {
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let agg_id = AggregateId::new("dm-alo-restart-agg");
     let projection_id = ProjectionId::new("dm-alo-restart");
 
@@ -446,21 +451,11 @@ async fn at_least_once_failed_event_is_reprocessed_after_restart() {
     // Stop the first projector and wait for it to fully deregister before
     // starting the second run; without this, both projectors can race on
     // the offset store.
-    let proxy_pid = proxy.pid();
-    let _ = proxy.stop().await;
-    {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            if system.process_system().lookup(proxy_pid).await.is_none() {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "timed out waiting for projector to fully stop"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-    }
+    proxy.stop().await;
+    assert!(
+        !proxy.is_active().await,
+        "the first projector must have fully stopped"
+    );
 
     // Verify: offset is at seq=1 (seq=2 was not saved due to failure)
     let offset_after_first_run = offset_store
@@ -521,7 +516,8 @@ async fn exactly_once_framework_does_not_save_offset() {
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let agg_id = AggregateId::new("dm-eo-agg");
     let projection_id = ProjectionId::new("dm-eo");
 

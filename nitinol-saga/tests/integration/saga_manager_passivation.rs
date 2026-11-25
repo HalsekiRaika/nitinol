@@ -179,7 +179,8 @@ async fn idle_instance_is_passivated_and_restored_by_replay_on_revisit() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
 
     // One journal: the pings the saga observes and the instance's own stream
     // are tenants of the store the system distributes.
@@ -261,7 +262,8 @@ async fn manager_outlives_a_system_default_idle_timeout_during_a_quiet_upstream(
         .await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
 
     let journal = system.persistence().event_store();
     let upstream_key = AggregateId::new("mgr-quiet-upstream-pings");

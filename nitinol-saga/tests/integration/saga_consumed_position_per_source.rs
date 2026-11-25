@@ -355,7 +355,8 @@ async fn spawn_shared(
 async fn one_sources_position_does_not_cover_another_sources_record() {
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
     let journal = system.persistence().event_store();
 
     let shared = AggregateId::new("per-source-shared");
@@ -403,7 +404,8 @@ async fn one_sources_position_does_not_cover_another_sources_record() {
 async fn the_position_a_decision_carries_names_its_own_source() {
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
     let journal = system.persistence().event_store();
 
     let shared = AggregateId::new("written-shared");

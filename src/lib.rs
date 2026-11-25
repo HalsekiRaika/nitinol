@@ -78,7 +78,7 @@
 //!     let persistence = PersistenceProvider::new(InMemoryStore::default());
 //!     let system = EventSourceSystem::builder(ps)
 //!         .with_persistence(persistence)
-//!         .build();
+//!         .build().await;
 //!
 //!     let counter = system
 //!         .spawn_aggregate::<Counter>(AggregateId::new("counter-1"))
@@ -244,6 +244,7 @@ pub mod eventsource {
     /// type namespace, derive in the macro namespace — as `serde` does).
     pub use nitinol_macros::Event;
 
+    pub use nitinol_eventsource::IdleTimeout;
     pub use nitinol_eventsource::Query;
     pub use nitinol_eventsource::RetryPolicy;
     pub use nitinol_eventsource::{AggregateProps, AggregateProxy, AggregateTellTarget};
@@ -256,7 +257,7 @@ pub mod eventsource {
     };
     pub use nitinol_eventsource::{
         EventEnvelope, EventSet, EventUnset, OriginSet, OriginUnset, ProjectionContext,
-        ProjectionId, Projector, ProjectorProps, TxProvider,
+        ProjectionId, Projector, ProjectorHandle, ProjectorProps, TxProvider,
     };
     pub use nitinol_eventsource::{SnapshotPersistor, SnapshotPersistorProxy};
 }

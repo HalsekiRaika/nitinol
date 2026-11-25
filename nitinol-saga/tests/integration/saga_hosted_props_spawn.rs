@@ -205,7 +205,8 @@ async fn a_saga_hosted_from_a_system_runs_on_that_system() {
     let store = InMemoryStore::default();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(store.clone()))
-        .build();
+        .build()
+        .await;
     let saga_id = SagaId::new(SAGA_ID);
     // One journal: the order stream the saga observes and the saga's own stream
     // are tenants of the store the system was built on, kept apart by key.
@@ -261,7 +262,8 @@ async fn manager_props_built_directly_start_on_the_system_they_are_given() {
     let store = InMemoryStore::default();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(store.clone()))
-        .build();
+        .build()
+        .await;
     let saga_id = SagaId::new(SAGA_ID);
     let journal = store.events();
     let order_id = AggregateId::new("saga-unhosted-manager-order");

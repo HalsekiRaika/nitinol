@@ -240,7 +240,8 @@ async fn a_manager_decodes_each_source_once_and_routes_both_to_the_same_instance
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
 
     // Each source reads a stream key of its own, which is the ordinary shape:
     // two aggregates a coordinator watches — tenants of the one journal the

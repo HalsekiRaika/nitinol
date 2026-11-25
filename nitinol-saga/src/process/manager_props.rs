@@ -210,7 +210,7 @@ where
         self,
         system: &EventSourceSystem<St>,
     ) -> SagaHostProxy<S> {
-        let store = system.persistence().event_store();
+        let store = system.event_store();
         let offsets = system.persistence().saga_offsets();
         let host = system.to_contingent();
         let ps = system.process_system();
@@ -349,7 +349,7 @@ where
     /// let store = CustomStore::builder().eventstore(InMemoryEventStore::default()).build();
     /// let system = EventSourceSystem::builder(ps)
     ///     .with_persistence(PersistenceProvider::new(store))
-    ///     .build();
+    ///     .build().await;
     /// SagaManagerProps::<ReservationSaga>::new(|_| ReservationSaga)
     ///     .observing::<OrderPlaced>(Subscription::stream(&AggregateId::new("order")))
     ///     .spawn(&system)
@@ -441,7 +441,7 @@ where
     /// # let ps = ProcessSystem::new().await;
     /// # let system = EventSourceSystem::builder(ps)
     /// #     .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-    /// #     .build();
+    /// #     .build().await;
     /// # let order_id = AggregateId::new("order");
     /// // `StockReserved` is declared and never bound, so `spawn` does not exist
     /// system
@@ -507,7 +507,7 @@ mod compile_fail_fixtures {
     /// # let ps = ProcessSystem::new().await;
     /// # let system = EventSourceSystem::builder(ps)
     /// #     .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-    /// #     .build();
+    /// #     .build().await;
     /// system
     ///     .host::<ReservationSaga>(|_| ReservationSaga)
     ///     .spawn()
@@ -564,7 +564,7 @@ mod compile_fail_fixtures {
     /// # let ps = ProcessSystem::new().await;
     /// # let system = EventSourceSystem::builder(ps)
     /// #     .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-    /// #     .build();
+    /// #     .build().await;
     /// # let order_id = AggregateId::new("order");
     /// system
     ///     .host::<ReservationSaga>(|_| ReservationSaga)
@@ -634,7 +634,7 @@ mod compile_fail_fixtures {
     /// # let ps = ProcessSystem::new().await;
     /// # let system = EventSourceSystem::builder(ps)
     /// #     .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-    /// #     .build();
+    /// #     .build().await;
     /// # let order_id = AggregateId::new("order");
     /// system
     ///     .host::<ReservationSaga>(|_| ReservationSaga)

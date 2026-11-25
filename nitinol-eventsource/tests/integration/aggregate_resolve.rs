@@ -202,7 +202,8 @@ async fn concurrent_resolve_produces_a_single_writer() {
     let store = persistence.event_store();
     let system = EventSourceSystem::builder(ps)
         .with_persistence(persistence)
-        .build();
+        .build()
+        .await;
     let id = AggregateId::new("resolve-single-flight");
     let barrier = Arc::new(Barrier::new(CONCURRENT_RESOLVERS));
 
@@ -273,7 +274,8 @@ async fn second_spawn_aggregate_addresses_the_same_aggregate() {
     let store = persistence.event_store();
     let system = EventSourceSystem::builder(ps)
         .with_persistence(persistence)
-        .build();
+        .build()
+        .await;
     let id = AggregateId::new("resolve-second-spawn");
 
     let first = system.spawn_aggregate::<Counter>(id.clone()).await;
@@ -319,7 +321,8 @@ async fn aggregate_props_spawn_addresses_the_same_aggregate() {
     let store = persistence.event_store();
     let system = EventSourceSystem::builder(ps)
         .with_persistence(persistence)
-        .build();
+        .build()
+        .await;
     let id = AggregateId::new("resolve-props-path");
 
     let spawned = system.spawn_aggregate::<Counter>(id.clone()).await;
@@ -364,7 +367,8 @@ async fn aggregate_props_for_a_recovering_aggregate_addresses_the_same_aggregate
     let store = persistence.event_store();
     let system = EventSourceSystem::builder(ps)
         .with_persistence(persistence)
-        .build();
+        .build()
+        .await;
     let id = AggregateId::new("resolve-props-snapshot");
 
     let first = system
@@ -419,12 +423,14 @@ async fn reference_survives_the_death_of_its_activation() {
     let store = persistence.event_store();
     let system = EventSourceSystem::builder(ps)
         .with_persistence(persistence)
-        .build();
+        .build()
+        .await;
     let id = AggregateId::new("resolve-self-heal");
 
     let rival_system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(store.clone()))
-        .build();
+        .build()
+        .await;
     let rival = AggregateProps::<Counter>::new(id.clone())
         .spawn(&rival_system)
         .await;

@@ -93,7 +93,8 @@ async fn a_resident_scheduler_alone_restores_nothing() {
                 .eventstore(saga_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     // Asked for directly, with no saga in the system: the core comes up on its
     // own so that what it does at start-up is all that is under test here.
     let _scheduler = system

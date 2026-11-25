@@ -117,6 +117,7 @@ async fn system_over(store: &Journal) -> EventSourceSystem<Journal> {
     EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(store.clone()))
         .build()
+        .await
 }
 
 /// Activate one writer for `id` on `system`.
@@ -502,6 +503,10 @@ impl EventStore for FailFirstLoadStore {
             ));
         }
         self.inner.load(query).await
+    }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
     }
 }
 

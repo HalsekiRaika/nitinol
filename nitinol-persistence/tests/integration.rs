@@ -15,6 +15,8 @@ mod event_registry_constructors_are_not_public;
 mod event_registry_linked;
 #[path = "integration/event_store.rs"]
 mod event_store;
+#[path = "integration/event_store_head.rs"]
+mod event_store_head;
 #[path = "integration/event_store_load_query_conjunction.rs"]
 mod event_store_load_query_conjunction;
 #[path = "integration/event_store_occ.rs"]
@@ -23,6 +25,8 @@ mod event_store_occ;
 mod event_store_prefix_search;
 #[path = "integration/event_store_str_key.rs"]
 mod event_store_str_key;
+#[path = "integration/journal_append_observer.rs"]
+mod journal_append_observer;
 #[path = "integration/journal_clone_shares_backend_state.rs"]
 mod journal_clone_shares_backend_state;
 #[path = "integration/journal_names_no_slot_beyond_itself.rs"]

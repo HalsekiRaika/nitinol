@@ -215,7 +215,8 @@ async fn non_terminated_saga_handles_routed_event() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
 
     // One journal: the order stream the saga observes and the saga's own stream
     // are tenants of the store the system distributes.
@@ -253,7 +254,8 @@ async fn terminated_saga_drops_routed_records_and_never_handles() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
 
     let journal = system.persistence().event_store();
     let order_id = AggregateId::new("terminated-order");
@@ -294,7 +296,8 @@ async fn saga_that_ended_is_skipped_when_respawned_over_same_store() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
 
     let journal = system.persistence().event_store();
     let order_id = AggregateId::new("respawn-order");

@@ -197,6 +197,10 @@ impl EventStore for SlowEventStore {
         tokio::time::sleep(self.load_delay).await;
         self.inner.load(query).await
     }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
+    }
 }
 
 // Helpers
@@ -206,6 +210,7 @@ async fn node_over<St: Store>(store: &St) -> EventSourceSystem<St> {
     EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(store.clone()))
         .build()
+        .await
 }
 
 /// A store holding both the journal and the snapshot slot a

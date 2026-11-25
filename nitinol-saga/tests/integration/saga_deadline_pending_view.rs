@@ -251,6 +251,10 @@ impl EventStore for FailScheduleAppendStore {
     async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
         self.inner.load(query).await
     }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
+    }
 }
 
 // Helpers
@@ -356,6 +360,7 @@ async fn in_memory_system() -> EventSourceSystem<InMemoryStore> {
     EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build()
+        .await
 }
 
 async fn spawn_view_saga<St: SagaOffsetSlot>(
@@ -503,7 +508,8 @@ async fn an_append_that_never_landed_leaves_the_pending_view_empty() {
                 .saga_offsets(InMemoryOffsetStore::default())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let journal = system.persistence().event_store();
 
     // The first probe sets a deadline whose fact cannot land; the second reads

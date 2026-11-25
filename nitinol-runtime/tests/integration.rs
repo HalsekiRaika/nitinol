@@ -29,6 +29,10 @@ mod messaging;
 mod pipe_bounded;
 #[path = "integration/pipe_to_self.rs"]
 mod pipe_to_self;
+#[path = "integration/process_state.rs"]
+mod process_state;
+#[path = "integration/process_waker.rs"]
+mod process_waker;
 #[path = "integration/props_builder_chain.rs"]
 mod props_builder_chain;
 #[path = "integration/props_capacity_types.rs"]

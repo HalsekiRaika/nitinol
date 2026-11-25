@@ -173,6 +173,7 @@ async fn system() -> EventSourceSystem<InMemoryStore> {
     EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build()
+        .await
 }
 
 /// Given both namespaces are glob-imported, When the bare `SagaDeliveryScope`

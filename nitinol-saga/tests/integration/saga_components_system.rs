@@ -295,7 +295,8 @@ async fn an_instance_the_host_spawns_reaches_the_hosting_systems_resources() {
     let store = InMemoryStore::default();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(store.clone()))
-        .build();
+        .build()
+        .await;
     let target = AggregateId::new(TARGET);
 
     let from_outside = system.spawn_aggregate::<Ledger>(target.clone()).await;
@@ -369,7 +370,8 @@ async fn a_saga_built_from_props_is_handed_the_system_it_was_spawned_on() {
     // Given
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
     let upstream = system.persistence().event_store();
     let order_id = AggregateId::new("saga-components-props-order");
     let report = Arc::new(Report::default());

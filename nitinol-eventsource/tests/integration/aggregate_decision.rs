@@ -198,6 +198,10 @@ impl EventStore for CountingStore {
     async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
         self.inner.load(query).await
     }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
+    }
 }
 
 // Helpers
@@ -207,6 +211,7 @@ async fn system_over(store: &Journal) -> EventSourceSystem<Journal> {
     EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(store.clone()))
         .build()
+        .await
 }
 
 /// Activate one writer for `id` on `system`.

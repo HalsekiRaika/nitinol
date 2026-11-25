@@ -288,6 +288,7 @@ async fn system() -> EventSourceSystem<InMemoryStore> {
     EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build()
+        .await
 }
 
 async fn spawn_codec_saga(

@@ -106,7 +106,8 @@ async fn catchup_all_events_processed_from_empty_offset() {
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
 
     for seq in 1..=3 {
         append_evt(&event_store, &agg_id, seq).await;
@@ -157,7 +158,8 @@ async fn catchup_skips_events_before_offset() {
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
 
     for seq in 1..=3 {
         append_evt(&event_store, &agg_id, seq).await;
@@ -211,7 +213,8 @@ async fn catchup_empty_store_project_never_called() {
                 .projection_offsets(offset_store)
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
 
     let count = Arc::new(AtomicUsize::new(0));
 
@@ -250,7 +253,8 @@ async fn catchup_multiple_aggregates_projected_in_global_sequence_order() {
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
 
     append_evt(&event_store, &agg_a, 1).await;
     append_evt(&event_store, &agg_b, 1).await;
@@ -297,7 +301,8 @@ async fn catchup_then_live_append_is_projected_via_durable_stream() {
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
 
     for seq in 1..=2 {
         append_evt(&event_store, &agg_id, seq).await;

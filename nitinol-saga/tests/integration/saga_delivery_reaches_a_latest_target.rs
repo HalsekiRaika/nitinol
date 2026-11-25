@@ -100,7 +100,8 @@ async fn a_decision_for_a_latest_aggregate_lands_on_the_state_its_snapshot_recov
     let store = InMemoryStore::default();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(store.clone()))
-        .build();
+        .build()
+        .await;
     let target = AggregateId::new(format!("latest-target{SHELF_SUFFIX}"));
     system
         .snapshot_persistor()

@@ -15,7 +15,7 @@ use crate::durable_stream::batch::{PolledBatch, SettledThrough};
 use crate::durable_stream::cursor::SequenceCursor;
 use crate::durable_stream::poller::{
     BatchPollerProcess, DirectPollerProcess, DurablePollerProcess, IntervalDriver, Poll,
-    SharedPollState, TransformFn,
+    ReachedEnd, SharedPollState, TransformFn,
 };
 
 const POLLER_RESTART_MAX_RETRIES: u32 = 5;
@@ -147,18 +147,23 @@ where
     /// records, instead of a record at a time.
     ///
     /// The lifetime, supervision and interval are those of
-    /// [`Self::spawn_child`]; what differs is the unit of delivery, and that a
-    /// read which came back full and settled whole is followed by the next one
-    /// at once. This is the road a projector takes, so it can settle a read as
-    /// one unit.
+    /// [`Self::spawn_child`]; what differs is the unit of delivery, that a read
+    /// which came back full and settled whole is followed by the next one at
+    /// once, that the poller reads at once when told
+    /// [`ReadNow`](super::poller::ReadNow), and that it tells `ctx`'s process
+    /// [`ReachedEnd`] the first time a read finds nothing. This is the road a
+    /// projector takes, so it can settle a read as one unit.
     pub(crate) async fn spawn_batch_child<S>(
         &self,
         ctx: &mut ProcessContext<S>,
         journal: Journal,
         cursor: SequenceCursor,
         batch_limit: NonZeroUsize,
-    ) where
-        S: Process + Receive<PolledBatch<T>, Response = SettledThrough>,
+    ) -> ProcessProxy<BatchPollerProcess<T, S>>
+    where
+        S: Process
+            + Receive<PolledBatch<T>, Response = SettledThrough>
+            + Receive<ReachedEnd, Response = ()>,
     {
         let subscriber = ctx.self_proxy().clone();
         let transform = Arc::clone(&self.transform);
@@ -169,10 +174,11 @@ where
                 transform: Arc::clone(&transform),
                 cursor: cursor.clone(),
                 batch_limit,
+                reported_end: false,
             },
             None,
         );
-        ctx.spawn_child(props).await;
+        ctx.spawn_child(props).await
     }
 
     /// Spawn a `DirectPollerProcess` as a runtime **child** of `ctx`'s process,

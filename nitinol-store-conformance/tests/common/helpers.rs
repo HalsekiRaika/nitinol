@@ -84,8 +84,9 @@ impl Executor for TokioExecutor {
     }
 }
 
-/// The way a [`SkewedEventStore`] lets the order it numbers events in come apart
-/// from the order it makes them visible in.
+/// The way a [`SkewedEventStore`] departs from what an event store owes: the
+/// order it numbers events in comes apart from the order it makes them visible
+/// in, or the head it answers comes apart from where the journal ends.
 #[derive(Debug, Clone, Copy)]
 pub enum Fault {
     /// The first append takes its `global_sequence` and then withholds the
@@ -100,6 +101,23 @@ pub enum Fault {
     /// A batch of two or more events is served one event short to the first
     /// load that would return it, which breaks OCC-3's commit unit.
     WithholdLastEventOfMultiEventBatch,
+    /// The head is the first position the latest committed append was
+    /// assigned, rather than its last.
+    ///
+    /// HEAD-1: after a batch of two or more events the head falls short of the
+    /// tail the append acknowledged, so a reader starting from the head would
+    /// take the rest of that batch for events still to come. A single-event
+    /// append is answered correctly, which is why only a batch tells it apart.
+    HeadAtTheFirstEventOfTheLatestBatch,
+    /// The head is the highest position of the stream the latest `append` call
+    /// named — refused and empty calls included — rather than of the journal.
+    ///
+    /// HEAD-2: right after a committed append the stream it named holds the
+    /// journal's highest position, so HEAD-1 holds. Once a call naming another
+    /// stream is refused, the head drops below events the journal already
+    /// serves, and a reader taking the head as where the journal ends never
+    /// asks for them.
+    HeadOfTheStreamLastNamed,
 }
 
 /// A store under test that brings up a backend breaking exactly the one clause
@@ -137,6 +155,10 @@ struct SkewedState {
     hidden_once: HashSet<u64>,
     next_global_sequence: u64,
     highest_global_sequence_a_load_returned: u64,
+    /// The first position the latest committed append was assigned.
+    first_of_the_latest_commit: Option<u64>,
+    /// The stream the latest `append` call named, whatever became of it.
+    stream_last_named: Option<String>,
 }
 
 /// A store that keeps the OCC contract except for the clause its fault names.
@@ -173,6 +195,8 @@ impl SkewedEventStore {
                 // implementation.
                 next_global_sequence: 1,
                 highest_global_sequence_a_load_returned: 0,
+                first_of_the_latest_commit: None,
+                stream_last_named: None,
             })),
         }
     }
@@ -185,6 +209,7 @@ impl SkewedEventStore {
 
     fn stage(&self, key: &str, events: Vec<AppendingEvent>) -> Result<Staged, AppendError> {
         let mut state = self.lock();
+        state.stream_last_named = Some(key.to_owned());
 
         // Conflict detection counts withheld events too: withholding delays
         // when a write becomes readable, and must not turn a taken sequence
@@ -219,6 +244,9 @@ impl SkewedEventStore {
                 payload: event.payload,
                 occurred_at: event.occurred_at,
             });
+        }
+        if let Some(first) = assigned_sequences.first() {
+            state.first_of_the_latest_commit = Some(*first);
         }
 
         if matches!(self.fault, Fault::WithholdLastEventOfMultiEventBatch) && staged.len() > 1 {
@@ -320,6 +348,30 @@ impl EventStore for SkewedEventStore {
         drop(state);
 
         Ok(Box::pin(stream::iter(matching.into_iter().map(Ok))))
+    }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        let state = self.lock();
+        let head = match self.fault {
+            Fault::HeadAtTheFirstEventOfTheLatestBatch => state.first_of_the_latest_commit,
+            Fault::HeadOfTheStreamLastNamed => {
+                state.stream_last_named.as_deref().and_then(|named| {
+                    state
+                        .visible
+                        .iter()
+                        .filter(|event| event.stream_key == named)
+                        .map(|event| event.global_sequence)
+                        .max()
+                })
+            }
+            // What the reference implementation answers: the last position it
+            // handed out, and nothing before it has handed one out.
+            Fault::DelayFirstAppendVisibility | Fault::WithholdLastEventOfMultiEventBatch => state
+                .next_global_sequence
+                .checked_sub(1)
+                .filter(|last| *last > 0),
+        };
+        Ok(head)
     }
 }
 

@@ -162,7 +162,8 @@ async fn wait_for_count(
 async fn saga_context_exposes_upstream_aggregate_id_from_envelope() {
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
     let journal = system.persistence().event_store();
     let order_id = AggregateId::new("saga-ctx-upstream-order");
 
@@ -198,7 +199,8 @@ async fn saga_context_exposes_upstream_aggregate_id_from_envelope() {
 async fn saga_context_exposes_upstream_sequence_from_envelope() {
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
     let journal = system.persistence().event_store();
     let order_id = AggregateId::new("saga-ctx-upstream-seq-order");
 
@@ -239,7 +241,8 @@ async fn saga_context_now_returns_runtime_timestamp_not_unix_epoch() {
 
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
     let journal = system.persistence().event_store();
     let order_id = AggregateId::new("saga-ctx-now-order");
 
@@ -283,7 +286,8 @@ async fn saga_context_now_returns_runtime_timestamp_not_unix_epoch() {
 async fn saga_context_existing_accessors_remain_saga_scoped() {
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
     let journal = system.persistence().event_store();
     let order_id = AggregateId::new("saga-ctx-saga-scope-order");
 

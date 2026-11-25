@@ -4,10 +4,12 @@ mod fused;
 mod message;
 mod pipe;
 mod stash;
+mod waker;
 
 pub use self::combine::Combine;
 pub use self::default::DefaultDriver;
 pub use self::pipe::{PipeDriver, PipeHandle, PipePanic, PipedTask};
+pub use self::waker::ProcessWaker;
 
 pub(crate) use self::fused::FusedDriver;
 pub(crate) use self::message::MessageDriver;
@@ -79,4 +81,88 @@ pub trait Driver<P: Process>: Send + 'static {
     fn pipe_handle(&self) -> Option<PipeHandle<P>> {
         None
     }
+
+    /// Hands this driver its process's [`ProcessWaker`].
+    ///
+    /// The lifecycle calls this once, on the composed driver tree, before the
+    /// process's `on_start` and before its loop starts. [`Combine`] hands a
+    /// clone to both children, and a driver installed via
+    /// [`Props::with_driver`](crate::process::Props::with_driver) receives it
+    /// too. The default does nothing, so a driver that ignores the waker keeps
+    /// its behaviour.
+    ///
+    /// A driver that honours the waker keeps it and, in `next`, waits on
+    /// whichever of its own wait and [`ProcessWaker::woken`] completes first;
+    /// when woken, it delivers one event at once — a tick driver reads now
+    /// instead of waiting out its interval.
+    ///
+    /// The waker is the one [`ProcessContext::waker`] returns, so a process
+    /// wakes its own driver from a handler. Below, `Reader` reads on every
+    /// tick of `Ticker`, and a `ReadNow` message has it read at once:
+    ///
+    /// ```
+    /// # use std::convert::Infallible;
+    /// # use std::time::Duration;
+    /// # use nitinol_runtime::error::HandlerError;
+    /// # use nitinol_runtime::process::{Driver, Process, ProcessContext, ProcessWaker, Receive};
+    /// struct Reader;
+    ///
+    /// impl Process for Reader {}
+    ///
+    /// struct Ticker {
+    ///     interval: Duration,
+    ///     waker: Option<ProcessWaker>,
+    /// }
+    ///
+    /// impl Driver<Reader> for Ticker {
+    ///     type Event = ();
+    ///
+    ///     async fn next(&mut self) -> Option<()> {
+    ///         let sleep = tokio::time::sleep(self.interval);
+    ///         match &self.waker {
+    ///             Some(waker) => tokio::select! {
+    ///                 _ = sleep => {}
+    ///                 _ = waker.woken() => {}
+    ///             },
+    ///             None => sleep.await,
+    ///         }
+    ///         Some(())
+    ///     }
+    ///
+    ///     async fn apply(
+    ///         &mut self,
+    ///         _state: &mut Reader,
+    ///         _ctx: &mut ProcessContext<Reader>,
+    ///         _ev: (),
+    ///     ) -> Result<(), HandlerError> {
+    ///         // read
+    ///         Ok(())
+    ///     }
+    ///
+    ///     fn attach_waker(&mut self, waker: ProcessWaker) {
+    ///         self.waker = Some(waker);
+    ///     }
+    /// }
+    ///
+    /// struct ReadNow;
+    ///
+    /// impl Receive<ReadNow> for Reader {
+    ///     type Response = ();
+    ///     type Error = Infallible;
+    ///
+    ///     async fn recv(
+    ///         &mut self,
+    ///         _msg: ReadNow,
+    ///         ctx: &mut ProcessContext<Self>,
+    ///     ) -> Result<(), Infallible> {
+    ///         ctx.waker().wake();
+    ///         Ok(())
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// Code outside the process does not need the waker: it sends the process
+    /// a message like `ReadNow`.
+    #[allow(unused_variables)]
+    fn attach_waker(&mut self, waker: ProcessWaker) {}
 }

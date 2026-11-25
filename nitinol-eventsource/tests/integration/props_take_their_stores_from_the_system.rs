@@ -349,6 +349,7 @@ async fn in_memory_system(store: InMemoryStore) -> EventSourceSystem<InMemorySto
     EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(store))
         .build()
+        .await
 }
 
 // Scenario: props started from a system are handed no store
@@ -513,7 +514,8 @@ async fn a_never_aggregate_spawns_on_a_store_holding_only_a_journal() {
         .build();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(journal_only))
-        .build();
+        .build()
+        .await;
     let id = AggregateId::new("props-from-system-never");
 
     // When

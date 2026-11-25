@@ -104,7 +104,8 @@ async fn projector_catches_up_via_the_journal_it_was_wired_over() {
                 .projection_offsets(InMemoryOffsetStore::default())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let store = system.persistence().event_store();
     let agg_id = AggregateId::new("projector-direct-store");
 

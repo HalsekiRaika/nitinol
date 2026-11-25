@@ -277,7 +277,8 @@ async fn scheduler_firing_activates_a_passivated_instance() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
 
     // One journal: the ping stream the saga observes and the instance's own
     // stream are tenants of the store the system distributes.

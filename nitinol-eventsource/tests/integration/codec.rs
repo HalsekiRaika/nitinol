@@ -205,7 +205,8 @@ async fn a_failing_encode_is_reported_as_a_codec_error_on_the_persist_path() {
         .with_persistence(PersistenceProvider::new(Journal::from(
             InMemoryEventStore::default(),
         )))
-        .build();
+        .build()
+        .await;
 
     let proxy = AggregateProps::<Recorder>::new(AggregateId::new("codec-encode-fails"))
         .spawn(&system)

@@ -275,7 +275,8 @@ async fn tx_provider_supplies_tx_to_projection_context() {
                 .projection_offsets(mock_cs.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let agg_id = AggregateId::new("tx-ctx-test");
 
     append_tick(&store, &agg_id, 1).await;
@@ -327,7 +328,8 @@ async fn exactly_once_with_tx_provider_saves_offset_in_same_tx() {
                 .projection_offsets(mock_cs.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let agg_id = AggregateId::new("tx-ckpt-test");
 
     append_tick(&store, &agg_id, 1).await;
@@ -376,7 +378,8 @@ async fn tx_provider_commit_called_after_successful_project() {
                 .projection_offsets(mock_cs.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let agg_id = AggregateId::new("tx-commit-test");
 
     append_tick(&store, &agg_id, 1).await;
@@ -433,7 +436,8 @@ async fn tx_provider_rollback_called_when_project_fails() {
                 .projection_offsets(mock_cs.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let agg_id = AggregateId::new("tx-rollback-test");
 
     append_tick(&store, &agg_id, 1).await;
@@ -505,7 +509,8 @@ async fn without_tx_provider_ctx_tx_returns_none() {
                 .projection_offsets(cs)
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
 
     append_tick(&store, &agg_id, 1).await;
 

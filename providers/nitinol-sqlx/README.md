@@ -33,7 +33,7 @@ let persistence = PersistenceProvider::new(PostgresStore::new(pool)?);
 
 let system = EventSourceSystem::builder(ProcessSystem::new().await)
     .with_persistence(persistence.clone())
-    .build();
+    .build().await;
 ```
 
 The supplier is what every wiring point resolves its store from, so a

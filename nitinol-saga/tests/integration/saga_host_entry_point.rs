@@ -200,7 +200,8 @@ async fn host_uses_the_codecs_its_events_name() {
                 .saga_offsets(InMemoryOffsetStore::default())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     // One journal: a subscription names the stream to observe and nothing about
     // where, so the upstream records are appended to the store the system
     // distributes, under a key of their own.
@@ -246,7 +247,8 @@ async fn stream_subscription_starts_at_the_beginning_of_the_upstream_stream() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
 
     let journal = system.persistence().event_store();
     let order_id = AggregateId::new("saga-host-entry-catchup-order");
@@ -280,7 +282,8 @@ async fn stream_subscription_after_override_skips_records_up_to_that_position() 
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
 
     let journal = system.persistence().event_store();
     let order_id = AggregateId::new("saga-host-entry-resume-order");

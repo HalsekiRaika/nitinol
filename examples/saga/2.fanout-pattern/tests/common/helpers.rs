@@ -149,7 +149,8 @@ pub async fn spawn_world(
                 .saga_offsets(offsets.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
 
     let payroll_run = system.spawn_aggregate::<PayrollRun>(run_id.clone()).await;
 
@@ -513,5 +514,9 @@ impl EventStore for UnreachablePayslipStore {
 
     async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
         self.inner.load(query).await
+    }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
     }
 }

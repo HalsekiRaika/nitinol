@@ -189,7 +189,8 @@ async fn durable_stream_catchup_all_events_from_zero() {
     let store = InMemoryEventStore::default();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(Journal::from(store.clone())))
-        .build();
+        .build()
+        .await;
     let ps = system.process_system();
     let agg_id = AggregateId::new("ds-catchup-agg");
     for seq in 1..=3 {
@@ -227,7 +228,8 @@ async fn durable_stream_resumes_from_start_sequence() {
     let store = InMemoryEventStore::default();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(Journal::from(store.clone())))
-        .build();
+        .build()
+        .await;
     let ps = system.process_system();
     let agg_id = AggregateId::new("ds-resume-agg");
     for seq in 1..=3 {
@@ -266,7 +268,8 @@ async fn durable_stream_live_events_after_catchup() {
     let store = InMemoryEventStore::default();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(Journal::from(store.clone())))
-        .build();
+        .build()
+        .await;
     let ps = system.process_system();
     let agg_id = AggregateId::new("ds-live-agg");
 
@@ -304,7 +307,8 @@ async fn durable_stream_multiple_subscribers_each_receive() {
     let store = InMemoryEventStore::default();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(Journal::from(store.clone())))
-        .build();
+        .build()
+        .await;
     let ps = system.process_system();
     let agg_id = AggregateId::new("ds-multi-agg");
 
@@ -349,7 +353,8 @@ async fn durable_stream_drop_proxy_stops_poller() {
     let store = InMemoryEventStore::default();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(Journal::from(store.clone())))
-        .build();
+        .build()
+        .await;
     let ps = system.process_system();
     let agg_id = AggregateId::new("ds-drop-agg");
 
@@ -394,7 +399,8 @@ async fn durable_stream_transform_returns_none_skips_event() {
     let store = InMemoryEventStore::default();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(Journal::from(store.clone())))
-        .build();
+        .build()
+        .await;
     let ps = system.process_system();
     let agg_id = AggregateId::new("ds-skip-agg");
 
@@ -434,7 +440,8 @@ async fn durable_stream_global_cursor_orders_across_aggregates() {
     let store = InMemoryEventStore::default();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(Journal::from(store.clone())))
-        .build();
+        .build()
+        .await;
     let ps = system.process_system();
     let agg_a = AggregateId::new("ds-global-a");
     let agg_b = AggregateId::new("ds-global-b");
@@ -472,7 +479,8 @@ async fn durable_stream_catchup_not_lost_before_subscribe() {
     let store = InMemoryEventStore::default();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(Journal::from(store.clone())))
-        .build();
+        .build()
+        .await;
     let ps = system.process_system();
     let agg_id = AggregateId::new("ds-presubscribe-agg");
     for seq in 1..=3 {
@@ -514,7 +522,8 @@ async fn durable_stream_late_subscriber_catchup_from_own_cursor() {
     let store = InMemoryEventStore::default();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(Journal::from(store.clone())))
-        .build();
+        .build()
+        .await;
     let ps = system.process_system();
     let agg_id = AggregateId::new("ds-late-sub-agg");
     for seq in 1..=3 {
@@ -566,7 +575,8 @@ async fn durable_stream_subscribe_from_ordering_with_concurrent_live_events() {
     let store = InMemoryEventStore::default();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(Journal::from(store.clone())))
-        .build();
+        .build()
+        .await;
     let ps = system.process_system();
     let agg_id = AggregateId::new("ds-order-agg");
     for seq in 1..=3 {
@@ -618,7 +628,8 @@ async fn durable_stream_spawn_with_duplicate_topic_returns_error() {
     let store = InMemoryEventStore::default();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(Journal::from(store.clone())))
-        .build();
+        .build()
+        .await;
     let ps = system.process_system();
     let _existing = ps
         .spawn(nitinol_runtime::StreamProps::<EventEnvelope<Evt>>::new(
@@ -645,7 +656,8 @@ async fn durable_stream_subscribe_from_does_not_open_shared_gate() {
     let store = InMemoryEventStore::default();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(Journal::from(store.clone())))
-        .build();
+        .build()
+        .await;
     let ps = system.process_system();
     let agg_id = AggregateId::new("ds-ds005-agg");
     for seq in 1..=3 {
@@ -698,7 +710,8 @@ async fn durable_stream_shared_poller_observable_via_registry_lookup_by_name() {
     let store = InMemoryEventStore::default();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(Journal::from(store.clone())))
-        .build();
+        .build()
+        .await;
     let ps = system.process_system();
 
     let ds = DurableStream::<EventEnvelope<Evt>>::new(
@@ -726,7 +739,8 @@ async fn durable_stream_poller_panic_is_recovered_by_supervision_restart() {
     let store = InMemoryEventStore::default();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(Journal::from(store.clone())))
-        .build();
+        .build()
+        .await;
     let ps = system.process_system();
     let agg_id = AggregateId::new("ds-panic-agg");
     for seq in 1..=3 {
@@ -790,7 +804,8 @@ async fn durable_stream_subscribe_from_poller_stops_when_subscriber_terminates()
     let store = InMemoryEventStore::default();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(Journal::from(store.clone())))
-        .build();
+        .build()
+        .await;
     let ps = system.process_system();
     let agg_id = AggregateId::new("ds-direct-stop-agg");
 
@@ -866,7 +881,8 @@ async fn durable_stream_direct_poller_observable_via_registry_lookup_by_name() {
     let store = InMemoryEventStore::default();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(Journal::from(store.clone())))
-        .build();
+        .build()
+        .await;
     let ps = system.process_system();
 
     let ds = DurableStream::<EventEnvelope<Evt>>::new(
@@ -909,7 +925,8 @@ async fn durable_stream_drop_proxy_keeps_direct_poller_until_subscriber_stops() 
     let store = InMemoryEventStore::default();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(Journal::from(store.clone())))
-        .build();
+        .build()
+        .await;
     let ps = system.process_system();
     let agg_id = AggregateId::new("ds-drop-direct-agg");
 
@@ -992,7 +1009,8 @@ async fn durable_stream_subscribe_from_twice_new_poller_stays_in_registry() {
     let store = InMemoryEventStore::default();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(Journal::from(store.clone())))
-        .build();
+        .build()
+        .await;
     let ps = system.process_system();
 
     let ds = DurableStream::<EventEnvelope<Evt>>::new(
@@ -1037,7 +1055,8 @@ async fn durable_stream_subscribe_from_twice_stops_old_direct_poller() {
     let store = InMemoryEventStore::default();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(Journal::from(store.clone())))
-        .build();
+        .build()
+        .await;
     let ps = system.process_system();
     let agg_id = AggregateId::new("ds-resubscribe-agg");
 
@@ -1187,7 +1206,8 @@ async fn direct_poller_cursor_not_advanced_when_handler_returns_err() {
     let store = InMemoryEventStore::default();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(Journal::from(store.clone())))
-        .build();
+        .build()
+        .await;
     let ps = system.process_system();
     let agg_id = AggregateId::new("dp-state-consistency-agg");
 

@@ -113,7 +113,7 @@ pub trait SagaSystemExt {
     /// let store = CustomStore::builder().eventstore(InMemoryEventStore::default()).build();
     /// let system = EventSourceSystem::builder(ps)
     ///     .with_persistence(PersistenceProvider::new(store))
-    ///     .build();
+    ///     .build().await;
     /// system.host::<ReservationSaga>(|_| ReservationSaga);
     /// # }
     /// ```
@@ -168,7 +168,7 @@ pub trait SagaSystemExt {
     /// # let ps = ProcessSystem::new().await;
     /// # let system = EventSourceSystem::builder(ps)
     /// #     .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-    /// #     .build();
+    /// #     .build().await;
     /// # let order_id = AggregateId::new("order");
     /// let saga = system
     ///     .host::<ReservationSaga>(|_| ReservationSaga)

@@ -168,7 +168,8 @@ async fn stream_after_one_end(upstream_key: &str, sku: &str) -> Vec<LoadedEvent>
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
+        .build()
+        .await;
 
     // One journal: the order stream the saga observes and the saga's own stream
     // are tenants of the store the system distributes, kept apart by stream key.

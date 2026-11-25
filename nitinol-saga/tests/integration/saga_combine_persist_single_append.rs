@@ -188,6 +188,10 @@ impl EventStore for RecordingStore {
     async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
         self.inner.load(query).await
     }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        self.inner.head().await
+    }
 }
 
 fn is_domain_event(event: &RecordedEvent) -> bool {
@@ -812,7 +816,8 @@ async fn fixture(stream: &str, sku: &str, saga_id: &str) -> Fixture {
                 .saga_offsets(InMemoryOffsetStore::default())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
 
     let order_id = AggregateId::new(stream);
     append_order_placed(&system.persistence().event_store(), &order_id, 1, sku).await;

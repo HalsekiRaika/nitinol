@@ -203,7 +203,8 @@ async fn e2e_at_least_once_failed_projection_retried_on_restart() {
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let agg_id = AggregateId::new("e2e-ckpt-alo-agg");
     let projection_id = ProjectionId::new("e2e-ckpt-alo");
 
@@ -247,19 +248,11 @@ async fn e2e_at_least_once_failed_projection_retried_on_restart() {
 
     // Explicitly stop the first projector and wait for it to leave the registry
     // before starting the second — ensures a true restart rather than two concurrent projectors.
-    let proxy_pid = proxy.pid();
-    proxy.stop().await.expect("first projector stop");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        if system.process_system().lookup(proxy_pid).await.is_none() {
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "first projector must unregister within 5s"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    proxy.stop().await;
+    assert!(
+        !proxy.is_active().await,
+        "first projector must have stopped before the second starts"
+    );
 
     // Verify offset is at seq=1 (seq=2 was not saved due to failure)
     let ckpt_after_first = offset_store
@@ -319,7 +312,8 @@ async fn e2e_exactly_once_user_saves_offset_prevents_reprocessing() {
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let agg_id = AggregateId::new("e2e-ckpt-eo-agg");
     let projection_id = ProjectionId::new("e2e-ckpt-eo");
 
@@ -410,7 +404,8 @@ async fn e2e_at_most_once_failed_event_not_retried_on_restart() {
                 .projection_offsets(offset_store.clone())
                 .build(),
         ))
-        .build();
+        .build()
+        .await;
     let agg_id = AggregateId::new("e2e-ckpt-amo-agg");
     let projection_id = ProjectionId::new("e2e-ckpt-amo");
 

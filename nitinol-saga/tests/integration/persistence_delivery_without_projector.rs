@@ -116,7 +116,8 @@ async fn a_store_without_a_projection_slot_still_wires_a_delivery_host() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(delivery_persistence(&journal, &offsets))
-        .build();
+        .build()
+        .await;
 
     let saga_id = SagaId::new("instance-delivery-only");
     let target = AggregateId::new("ledger-delivery-only");
@@ -167,7 +168,8 @@ async fn a_second_incarnation_resumes_above_the_position_the_first_recorded() {
     let first_journal = durable.clone();
     let first_system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(delivery_persistence(&first_journal, &offsets))
-        .build();
+        .build()
+        .await;
 
     let saga_id = SagaId::new("instance-delivery-restart");
     let target = AggregateId::new("ledger-delivery-restart");
@@ -203,7 +205,8 @@ async fn a_second_incarnation_resumes_above_the_position_the_first_recorded() {
     let second_journal = recording.clone();
     let second_system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(delivery_persistence(&second_journal, &offsets))
-        .build();
+        .build()
+        .await;
     let _second_host = second_system
         .host::<DeliverySaga>(|_components| DeliverySaga)
         .observing::<Triggered>(quiet_source("upstream-delivery-restart-second"))

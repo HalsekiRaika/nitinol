@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use crate::ident::{Pid, ProcessName};
 use crate::process::dead_letter::DeadLetterProxy;
 use crate::process::driver::{
-    Combine, Driver, FusedDriver, MessageDriver, PipeDriver, StashDriver, StashHandle,
+    Combine, Driver, FusedDriver, MessageDriver, PipeDriver, ProcessWaker, StashDriver, StashHandle,
 };
 use crate::process::pid_set::PidSet;
 use crate::process::props::{MailboxCapacity, PipeCapacity, StashCapacity, SupervisionStrategy};
@@ -17,8 +17,8 @@ use crate::process::registry::ProcessRegistry;
 use crate::process::signal::SystemSignal;
 use crate::process::supervision::{RestartTracker, SupervisionConfig};
 use crate::process::task::UserTask;
-use crate::process::watch::{Terminated, TerminatedReason};
-use crate::process::{Process, ProcessContext, ProcessProxy};
+use crate::process::watch::{SharedProcessState, Terminated, TerminatedReason};
+use crate::process::{Process, ProcessContext, ProcessProxy, ProcessState};
 
 /// Resolved parameters every spawn needs to wire into the lifecycle loop.
 ///
@@ -72,6 +72,7 @@ pub(crate) async fn run<P: Process, D: Driver<P>>(cfg: LifecycleConfig<P, D>) ->
         sys_tx: sys_tx.clone(),
         dead_letter: dead_letter.clone(),
         registry: registry.clone(),
+        state: SharedProcessState::new(),
     };
 
     let any_proxy = proxy.clone().into();
@@ -178,8 +179,11 @@ async fn lifecycle_loop<P: Process, D: Driver<P>>(args: LifecycleLoopArgs<P, D>)
     let mut driver = driver;
     let mut watchers: HashSet<Pid> = HashSet::new();
     let mut restart_tracker = RestartTracker::new();
+    let lifecycle_state = self_proxy.state.clone();
 
     let pipe_handle = driver.pipe_handle();
+    let waker = ProcessWaker::new();
+    driver.attach_waker(waker.clone());
 
     let mut ctx = ProcessContext {
         pid,
@@ -190,6 +194,7 @@ async fn lifecycle_loop<P: Process, D: Driver<P>>(args: LifecycleLoopArgs<P, D>)
         self_proxy,
         pipe_handle,
         stash_handle: Some(stash_handle),
+        waker,
         pending_reply: None,
         parent,
         children: PidSet::new(),
@@ -219,6 +224,7 @@ async fn lifecycle_loop<P: Process, D: Driver<P>>(args: LifecycleLoopArgs<P, D>)
     }
 
     state.on_start(&mut ctx).await;
+    lifecycle_state.store(ProcessState::Running);
 
     // Set when `on_stop` is called at the start of a restart sequence so the
     // post-loop cleanup knows not to call it again for the same state.
@@ -300,6 +306,15 @@ async fn lifecycle_loop<P: Process, D: Driver<P>>(args: LifecycleLoopArgs<P, D>)
         }
     };
 
+    // A child may be blocked inside its own handler on an `ask` that waits in
+    // this mailbox, and that child cannot take the `Stop` sent below until
+    // the ask returns. Dropping the driver tree closes the mailbox and drops
+    // every queued task, so such an ask returns `ReplyDropped` and the wait
+    // for the children can end. The mailbox is closed before the state reads
+    // `Stopping`, so a sender that sees `Stopping` is always refused.
+    drop(driver);
+    lifecycle_state.store(ProcessState::Stopping);
+
     if reason != TerminatedReason::Poisoned && !on_stop_called_in_restart {
         state.on_stop(&mut ctx).await;
     }
@@ -307,6 +322,7 @@ async fn lifecycle_loop<P: Process, D: Driver<P>>(args: LifecycleLoopArgs<P, D>)
     stop_children_and_wait(&mut ctx, &mut sys_rx, &mut watchers).await;
 
     registry.unregister(pid, process_name.as_ref()).await;
+    lifecycle_state.store(ProcessState::Stopped);
 
     // Drain any Watch signals that arrived after the last select! iteration
     // but before unregister, so we notify those watchers too.
@@ -524,6 +540,7 @@ mod tests {
             sys_tx: watcher_sys_tx,
             dead_letter: None,
             registry: registry.clone(),
+            state: SharedProcessState::new(),
         };
         registry
             .register(watcher_pid, watcher_proxy.into(), None)
@@ -546,6 +563,7 @@ mod tests {
             sys_tx: sys_tx.clone(),
             dead_letter: None,
             registry: registry.clone(),
+            state: SharedProcessState::new(),
         };
 
         let stash_driver = StashDriver::<NoOpProcess>::new(
