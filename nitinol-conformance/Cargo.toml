@@ -1,6 +1,6 @@
 [package]
 name = "nitinol-conformance"
-version = "0.6.1"
+version = "0.6.2"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -15,7 +15,7 @@ description = "Executable conformance suite for the laws any interpreter of the 
 # interpreter owes, and would be out of reach of anyone writing their own.
 [dependencies]
 nitinol-contract = { path = "../nitinol-contract", version = "0.6.1" }
-nitinol-persistence = { path = "../nitinol-persistence", version = "0.6.1" }
+nitinol-persistence = { path = "../nitinol-persistence", version = "0.7.0" }
 async-trait = "0.1"
 bytes = "1"
 futures-core = "0.3"

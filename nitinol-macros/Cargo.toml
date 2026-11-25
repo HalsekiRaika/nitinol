@@ -1,6 +1,6 @@
 [package]
 name = "nitinol-macros"
-version = "0.6.1"
+version = "0.6.2"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -23,7 +23,7 @@ proc-macro2 = "1"
 nitinol-contract = { path = "../nitinol-contract", version = "0.6.1" }
 # The uniqueness symbol a derived declaration exports belongs to the machinery
 # that collects declarations, so its prefix and byte set are read from there.
-nitinol-persistence = { path = "../nitinol-persistence", version = "0.6.1" }
+nitinol-persistence = { path = "../nitinol-persistence", version = "0.7.0" }
 
 [dev-dependencies]
 trybuild = "1"
