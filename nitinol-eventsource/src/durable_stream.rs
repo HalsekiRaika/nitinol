@@ -40,6 +40,6 @@ pub const DEFAULT_BATCH_LIMIT: NonZeroUsize = NonZeroUsize::new(1_000).expect("1
 #[doc(hidden)]
 pub use self::batch::{PolledBatch, SettledThrough};
 pub use self::cursor::SequenceCursor;
-pub(crate) use self::poller::{Nudge, PollerLink, ReadReport};
+pub(crate) use self::poller::{BatchPollerProcess, ReachedEnd, ReadNow};
 pub use self::proxy::{DurableStreamProxy, DurableSubscription};
 pub use self::stream::{CursorSet, CursorUnset, DurableStream};

@@ -16,7 +16,8 @@
 //!     Then the projector projects it well inside the 10 s
 //!
 //!   Scenario: an unrelated event does not wake a passivated projector
-//!     Given a passivated projector, and a watcher that has seen the event
+//!     Given a passivated projector, and a watcher that has had a turn since
+//!           the event was appended
 //!     When an event matching neither its origin nor its handlers is appended
 //!     Then the projector stays stopped
 //!
@@ -27,10 +28,11 @@
 //!     Then the projector is activated again and projects the event
 //!
 //!   Scenario: an event learned of just before the idle stop is not dropped
-//!     Given a projector whose next read is held, and an event appended that
-//!           the activator learns of while the projector still runs
-//!     When the idle timeout stops the projector
-//!     Then the activator activates it again at once, and the event is projected
+//!     Given a running projector polling every 10 s that has settled once, and
+//!           an event the activator learns of that the projector refuses once
+//!     When the idle timeout stops the projector with that event unsettled
+//!     Then the activator activates it again at once, not a poll interval
+//!          later, and the event is projected
 //!
 //!   Scenario: under the system default idle timeout a projector stays reachable
 //!     Given a system with a short default idle timeout and a projector naming
@@ -38,11 +40,6 @@
 //!     When the journal stays quiet for longer than the default, and an event
 //!          is appended afterwards
 //!     Then the projector projects it
-//!
-//!   Scenario: a system with no projector starts no activator
-//!     Given a system no projector has been spawned on
-//!     When its aggregate appends
-//!     Then no activator runs — its watcher has filed no position
 //!
 //!   Scenario: a second spawn of the same projection joins the running one
 //!     Given a running projector
@@ -88,10 +85,53 @@
 //!     And the store recovers, and a second event is appended
 //!     Then each event has been handled exactly once
 //!
-//!   Scenario: what a projector settled before a restart does not wake it again
-//!     Given a recorded projector position, and a watcher replaying history
-//!     When the replay reports records that position already covers
-//!     Then the projector is not activated again
+//!   Scenario: history from before the activator started does not wake a
+//!             projector whose position already covers it
+//!     Given a journal written before the activator started, and a recorded
+//!           projector position covering its records
+//!     When the projector is spawned, passivates, and the watcher has had turns
+//!     Then the projector is not activated again — the watcher reads from the
+//!          journal's head as the activator started, not from its beginning
+//!
+//!   Scenario: a poller restarted by its supervision starts no second projector
+//!     Given a projector whose poller's first read panics
+//!     When the poller's supervision restarts it and it reads again
+//!     Then the one projector projects the event once, and no second
+//!          activation starts
+//!
+//!   Scenario: a read that failed does not hold back the next append's wake
+//!     Given a running projector polling every 10 s, and a journal whose reads
+//!           fail
+//!     When an append is announced and its read fails, the journal recovers,
+//!          and another is appended
+//!     Then the projector projects both well inside the 10 s
+//!
+//!   Scenario: a re-registered projection's restored offset is not owed again
+//!     Given a projection stopped through its handle after projecting an event,
+//!           and spawned again before the watcher has read that event
+//!     When the watcher reads it
+//!     Then no further activation follows
+//!
+//!   Scenario: an offset that could not be loaded is loaded again after an
+//!             idle stop, though the journal is empty
+//!     Given an empty journal, an offset store whose loads fail, and an idle
+//!           timeout shorter than the poll interval
+//!     When the offset store recovers, with nothing appended
+//!     Then the activator activates the projector again and it starts
+//!
+//!   Scenario: a watcher whose head could not be read passes over no write
+//!     Given a journal whose head cannot be read as the activator starts
+//!     When a write no notification announced is made after the projector
+//!          passivated
+//!     Then the watcher picks it up and the projector projects it
+//!
+//!   Scenario: a stream projector weighs what it is owed in its stream's units
+//!     Given a projector following one stream, written interleaved with another
+//!     When it settles that stream's event and passivates
+//!     Then it stays passivated, though the event's global position is past its
+//!          stream offset
+//!     When its stream is appended to again
+//!     Then it is activated again and projects the event
 //! ```
 //!
 //! How many activations a projection has had is counted where each one starts:
@@ -104,9 +144,9 @@
 //! spawns — are the ones the activator is notified of; appends through
 //! `PersistenceProvider::event_store()` carry no observer, so only the watcher
 //! can learn of them. Where a test is about the notification, the watcher is
-//! disabled, so nothing else can be what woke the projector. Where a test needs
-//! to know the watcher has seen an event, it reads the position the watcher
-//! files under the framework's reserved `projection` scope.
+//! disabled, so nothing else can be what woke the projector. The watcher keeps
+//! no position of its own, so where a test needs it to have read past an
+//! event, it waits out two watcher intervals after the event is in the journal.
 //!
 //! The tests run on paused time: idle timers, quiet periods, poll and watcher
 //! intervals and the probe bounds are all virtual, so a quiet period is exactly
@@ -122,7 +162,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use tokio::sync::{watch, Notify};
+use tokio::sync::Notify;
 use tokio::time::Instant;
 
 use nitinol_eventsource::codec::Codec;
@@ -133,7 +173,7 @@ use nitinol_eventsource::{
 };
 use nitinol_persistence::error::{AppendError, LoadError, OffsetError};
 use nitinol_persistence::provider::{
-    CustomStore, PersistenceProvider, ProjectionOffsetSlot, Unprovided,
+    CustomStore, PersistenceProvider, ProjectionOffsetSlot, Store, Unprovided,
 };
 use nitinol_persistence::store::{
     DeliveryMode, EventStore, EventStream, InMemoryEventStore, InMemoryOffsetStore, InMemoryStore,
@@ -348,45 +388,32 @@ impl Projector<Watched> for CountingProjector {
     }
 }
 
-// Fixtures: a journal whose reads can be held
+// Fixtures: a journal whose next read can be made to panic
 
-/// Whether reads of a [`GatedJournal`] go through.
-#[derive(Clone)]
-struct Gate(Arc<watch::Sender<bool>>);
-
-impl Gate {
-    fn opened() -> Self {
-        Self(Arc::new(watch::channel(true).0))
-    }
-
-    fn close(&self) {
-        self.0.send_replace(false);
-    }
-
-    fn open(&self) {
-        self.0.send_replace(true);
-    }
-
-    async fn passed(&self) {
-        self.0
-            .subscribe()
-            .wait_for(|open| *open)
-            .await
-            .map(|_| ())
-            .expect("the gate's sender lives in the journal that waits on it");
-    }
+/// An in-memory journal whose next `load`, once armed, panics instead of
+/// reading, and counts the loads it panicked in; appends are never touched.
+///
+/// A panic is what a poller's supervision answers with a restart: the poller
+/// turns a panicking read into a handler error, and it runs under `Restart`.
+#[derive(Clone, Default)]
+struct PanickyJournal {
+    inner: InMemoryEventStore,
+    armed: Arc<AtomicBool>,
+    panicked: Arc<AtomicUsize>,
 }
 
-/// An in-memory journal whose `load` waits while its gate is closed; appends
-/// are never held.
-#[derive(Clone)]
-struct GatedJournal {
-    inner: InMemoryEventStore,
-    gate: Gate,
+impl PanickyJournal {
+    fn panic_on_next_load(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
+
+    fn panicked(&self) -> usize {
+        self.panicked.load(Ordering::SeqCst)
+    }
 }
 
 #[async_trait]
-impl EventStore for GatedJournal {
+impl EventStore for PanickyJournal {
     async fn append(
         &self,
         key: &str,
@@ -396,7 +423,10 @@ impl EventStore for GatedJournal {
     }
 
     async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
-        self.gate.passed().await;
+        if self.armed.swap(false, Ordering::SeqCst) {
+            self.panicked.fetch_add(1, Ordering::SeqCst);
+            panic!("intentional journal load panic");
+        }
         self.inner.load(query).await
     }
 
@@ -405,38 +435,7 @@ impl EventStore for GatedJournal {
     }
 }
 
-type GatedStore = CustomStore<Unprovided, InMemoryOffsetStore, Unprovided>;
-
-// Fixtures: an offset store whose loads can be held
-
-/// An in-memory offset store whose `load` waits while its gate is closed; saves
-/// are never held.
-#[derive(Clone)]
-struct GatedOffsets {
-    inner: InMemoryOffsetStore,
-    gate: Gate,
-}
-
-#[async_trait]
-impl OffsetStore for GatedOffsets {
-    type Tx = ();
-
-    async fn load(&self, scope: &OffsetScope) -> Result<Option<u64>, OffsetError> {
-        self.gate.passed().await;
-        self.inner.load(scope).await
-    }
-
-    async fn save(
-        &self,
-        scope: &OffsetScope,
-        sequence: u64,
-        tx: Option<&mut Self::Tx>,
-    ) -> Result<(), OffsetError> {
-        self.inner.save(scope, sequence, tx).await
-    }
-}
-
-type DoubleGatedStore = CustomStore<Unprovided, GatedOffsets, Unprovided>;
+type PanickyJournalStore = CustomStore<Unprovided, InMemoryOffsetStore, Unprovided>;
 
 // Fixtures: an offset store whose loads can be made to fail
 
@@ -549,6 +548,41 @@ impl EventStore for FlakyJournal {
 
 type FlakyJournalStore = CustomStore<Unprovided, InMemoryOffsetStore, Unprovided>;
 
+// Fixtures: a journal whose head cannot be read at first
+
+/// An in-memory journal whose `head` fails the first time it is asked.
+#[derive(Clone, Default)]
+struct HeadlessAtFirst {
+    inner: InMemoryEventStore,
+    asked: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl EventStore for HeadlessAtFirst {
+    async fn append(
+        &self,
+        key: &str,
+        events: Vec<AppendingEvent>,
+    ) -> Result<AppendOutcome, AppendError> {
+        self.inner.append(key, events).await
+    }
+
+    async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
+        self.inner.load(query).await
+    }
+
+    async fn head(&self) -> Result<Option<u64>, LoadError> {
+        if self.asked.swap(true, Ordering::SeqCst) {
+            return self.inner.head().await;
+        }
+        Err(LoadError::Backend(Box::new(std::io::Error::other(
+            "intentional journal head failure",
+        ))))
+    }
+}
+
+type HeadlessAtFirstStore = CustomStore<Unprovided, InMemoryOffsetStore, Unprovided>;
+
 // Helpers: systems
 
 /// Whether and how often the system's watcher runs.
@@ -609,38 +643,15 @@ fn flaky_journal_system(
         .build()
 }
 
-async fn gated_system(gate: &Gate) -> EventSourceSystem<GatedStore> {
-    EventSourceSystem::builder(without_default_idle().await)
+fn panicky_journal_system(
+    process_system: ProcessSystem,
+    journal: &PanickyJournal,
+) -> EventSourceSystem<PanickyJournalStore> {
+    EventSourceSystem::builder(process_system)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
-                .eventstore(GatedJournal {
-                    inner: InMemoryEventStore::default(),
-                    gate: gate.clone(),
-                })
+                .eventstore(journal.clone())
                 .projection_offsets(InMemoryOffsetStore::default())
-                .build(),
-        ))
-        .without_projection_watcher()
-        .build()
-}
-
-/// A system whose journal reads wait on `reads` and whose offset loads wait on
-/// `offset_loads`.
-async fn double_gated_system(
-    reads: &Gate,
-    offset_loads: &Gate,
-) -> EventSourceSystem<DoubleGatedStore> {
-    EventSourceSystem::builder(without_default_idle().await)
-        .with_persistence(PersistenceProvider::new(
-            CustomStore::builder()
-                .eventstore(GatedJournal {
-                    inner: InMemoryEventStore::default(),
-                    gate: reads.clone(),
-                })
-                .projection_offsets(GatedOffsets {
-                    inner: InMemoryOffsetStore::default(),
-                    gate: offset_loads.clone(),
-                })
                 .build(),
         ))
         .without_projection_watcher()
@@ -673,11 +684,6 @@ async fn append(
         .assigned_sequences
         .last()
         .expect("one appended event is given one global position")
-}
-
-/// Where the activator's watcher files how far it has read.
-fn watcher_scope() -> OffsetScope {
-    OffsetScope::framework_owned("projection", "watcher", 0)
 }
 
 /// The position `scope` is recorded at in the system's projection slot.
@@ -719,18 +725,27 @@ where
     until_within(what, PROBE_TIMEOUT, holds).await;
 }
 
-/// Wait until the system's watcher has read through global position `head`.
-async fn watcher_has_seen<St>(system: &EventSourceSystem<St>, head: u64)
+/// Wait until the system's watcher, running every [`WATCHER_INTERVAL`], has had
+/// a read since global position `position` was in the journal.
+///
+/// The watcher keeps no position to read back, so this is a wait of two of its
+/// intervals: whichever way its ticks fall, one read starts and ends within
+/// them, on virtual time that passes exactly as written.
+async fn watcher_has_had_a_read_past<St>(system: &EventSourceSystem<St>, position: u64)
 where
-    St: ProjectionOffsetSlot,
+    St: Store,
 {
-    let scope = watcher_scope();
-    let (system, scope) = (system, &scope);
-    until(
-        &format!("the watcher reading through global position {head}"),
-        move || async move { matches!(recorded(system, scope).await, Some(at) if at >= head) },
-    )
-    .await;
+    let head = system
+        .event_store()
+        .head()
+        .await
+        .expect("reading the head of the in-memory journal must succeed");
+    assert!(
+        head.is_some_and(|head| head >= position),
+        "global position {position} must be in the journal the watcher reads before it is \
+         waited on, but the head is {head:?}"
+    );
+    tokio::time::sleep(WATCHER_INTERVAL * 2).await;
 }
 
 // Scenario: an idle projector stops and an append notification wakes it
@@ -900,7 +915,7 @@ async fn an_event_type_a_global_projector_does_not_handle_leaves_it_stopped() {
         Unwatched::EVENT_TYPE,
     )
     .await;
-    watcher_has_seen(&system, head).await;
+    watcher_has_had_a_read_past(&system, head).await;
     tokio::time::sleep(QUIET).await;
 
     // Then
@@ -956,7 +971,7 @@ async fn an_event_in_another_stream_leaves_a_stream_projector_stopped() {
         Watched::EVENT_TYPE,
     )
     .await;
-    watcher_has_seen(&system, head).await;
+    watcher_has_had_a_read_past(&system, head).await;
     tokio::time::sleep(QUIET).await;
 
     // Then
@@ -1033,18 +1048,17 @@ async fn a_write_no_notification_announced_wakes_the_projector_after_the_watcher
 
 // Scenario: an event learned of just before the idle stop is not dropped
 
-/// Every read of the journal is held from the moment the projector has caught
-/// up, so the read its poller is nudged into cannot return before the idle
-/// timeout stops the projector. While the gate stays closed nothing can be
-/// read, so a second activation then can only come from the activator weighing
-/// what it learned (R) against what the projector settled (M) as it stopped.
-/// The projector follows every stream, so starting it reads nothing from the
-/// journal before its producer runs.
+/// The projector polls every [`LONG_POLL`] and has settled one batch in this
+/// activation, so the idle stop is not one the activator retries a poll
+/// interval later. The second event is announced to the activator (R moves
+/// past M) and read at once, but the projector refuses it, so nothing is
+/// settled and its poller would read it again only a [`LONG_POLL`] later — far
+/// past the idle timeout. What brings the event back well inside that is the
+/// activator weighing R against M as the projector stops on its idle timeout.
 #[tokio::test(start_paused = true)]
 async fn an_event_learned_of_before_the_idle_stop_activates_the_projector_again_at_once() {
-    // Given: a projector that has caught up, whose next read is held
-    let gate = Gate::opened();
-    let system = gated_system(&gate).await;
+    // Given: a projector polling every 10 s that has settled the first event
+    let system = system_on(without_default_idle().await, Watcher::Disabled);
     let journal = system.event_store();
     let id = ProjectionId::new("projection-activator-stop-race");
     let stream = AggregateId::new("projection-activator-stop-race");
@@ -1052,6 +1066,7 @@ async fn an_event_learned_of_before_the_idle_stop_activates_the_projector_again_
     let _handle = ProjectorProps::new(id.clone(), projection.producer())
         .with_event::<Watched>()
         .catchup_from_global()
+        .with_poll_interval(LONG_POLL)
         .with_idle_timeout(IdleTimeout::After(IDLE))
         .spawn(&system)
         .await;
@@ -1065,46 +1080,41 @@ async fn an_event_learned_of_before_the_idle_stop_activates_the_projector_again_
         move || async move { recorded(system_ref, scope).await == Some(first) },
     )
     .await;
-    gate.close();
+    assert!(IDLE < LONG_POLL);
 
-    // When: an event is appended while the projector still runs, and the idle
-    // timeout then stops it with that event unread
+    // When: an event the activator learns of is appended while the projector
+    // still runs, the projector refuses it, and the idle timeout then stops it
+    // with that event unsettled
+    projection.refuse_next(1);
+    let appended_at = Instant::now();
     let second = append(&journal, &stream, 2, Watched::EVENT_TYPE).await;
 
-    // Then: the activator activates it again while nothing can be read yet
+    // Then: it is projected by the next activation, not a poll interval later
     let projection_ref = &projection;
-    until(
-        "a second activation started as the first stopped with an event it had not settled",
-        move || async move { projection_ref.activations() >= 2 },
+    until_within(
+        "the event refused before the idle stop being projected",
+        LONG_POLL * 2,
+        move || async move { projection_ref.applied() >= 2 },
     )
     .await;
-    assert_eq!(
-        projection.applied(),
-        1,
-        "with every read held, the second event cannot have been read yet: the second \
-         activation must come from the position the activator knew, not from a read"
+    let projected_in = appended_at.elapsed();
+    assert!(
+        projected_in < NUDGED_WITHIN,
+        "the event the activator knew of took {projected_in:?} to be projected; a projector \
+         that stops on its idle timeout owing it must be activated again at once, not after \
+         its {LONG_POLL:?} poll interval"
     );
-
-    // When: reads go through again
-    gate.open();
-
-    // Then
-    projection
-        .counted(
-            2,
-            "the re-activated projector must project the second event",
-        )
-        .await;
+    assert_eq!(
+        (projection.activations(), projection.applied()),
+        (2, 2),
+        "the refused event must be projected by the one activation that followed the idle \
+         stop, and each event once — (activations, applied)"
+    );
     until(
         "the re-activated projector settling the second event",
         move || async move { recorded(system_ref, scope).await == Some(second) },
     )
     .await;
-    assert_eq!(
-        projection.applied(),
-        2,
-        "each event must be projected once across both activations"
-    );
 }
 
 // Scenario: under the system default idle timeout a projector stays reachable
@@ -1168,51 +1178,6 @@ async fn a_projector_naming_no_idle_timeout_stops_on_the_system_default_and_is_w
         2,
         "the projector must have stopped on the inherited default and been activated again"
     );
-}
-
-// Scenario: a system with no projector starts no activator
-
-/// Whether an activator runs is read off its watcher, which files a position
-/// as soon as it has read once. Spawning a projector afterwards, on the same
-/// system, is what makes that position appear — so its absence before is the
-/// activator not running, not the watcher being unreadable.
-#[tokio::test(start_paused = true)]
-async fn an_aggregate_append_on_a_system_with_no_projector_starts_no_activator() {
-    // Given
-    let system = system_on(
-        without_default_idle().await,
-        Watcher::Every(WATCHER_INTERVAL),
-    );
-    let stream = AggregateId::new("projection-activator-none");
-
-    // When: the system's aggregate appends, and several watcher intervals pass
-    let aggregate = system.spawn_aggregate::<Tally>(stream.clone()).await;
-    aggregate
-        .ask(Record)
-        .await
-        .expect("the aggregate must persist its event");
-    tokio::time::sleep(WATCHER_INTERVAL * 5).await;
-
-    // Then: no activator, so no watcher has filed a position
-    assert_eq!(
-        recorded(&system, &watcher_scope()).await,
-        None,
-        "an append on a system no projector was spawned on must not start the activator"
-    );
-
-    // When: the first projector is spawned on the same system
-    let projection = Projection::default();
-    let _handle = ProjectorProps::new(
-        ProjectionId::new("projection-activator-none"),
-        projection.producer(),
-    )
-    .with_event::<Watched>()
-    .catchup_from_aggregate(stream.clone())
-    .spawn(&system)
-    .await;
-
-    // Then: the activator it starts runs a watcher that reads the history
-    watcher_has_seen(&system, 1).await;
 }
 
 // Scenario: a second spawn of the same projection joins the running one
@@ -1353,7 +1318,7 @@ async fn a_projector_stopped_through_its_handle_is_not_activated_by_later_append
 
     // When: an event it followed is appended, and both paths have had it
     let head = append(&journal, &stream, 2, Watched::EVENT_TYPE).await;
-    watcher_has_seen(&system, head).await;
+    watcher_has_had_a_read_past(&system, head).await;
     tokio::time::sleep(QUIET).await;
 
     // Then
@@ -1401,7 +1366,7 @@ async fn a_system_without_the_watcher_leaves_an_unannounced_write_unread() {
 
     // When: a write no notification announces, and far longer than any
     // watcher interval
-    append(
+    let unannounced = append(
         &system.persistence().event_store(),
         &stream,
         2,
@@ -1418,9 +1383,14 @@ async fn a_system_without_the_watcher_leaves_an_unannounced_write_unread() {
          — (activations, applied)"
     );
     assert_eq!(
-        recorded(&system, &watcher_scope()).await,
-        None,
-        "a disabled watcher must not be started at all"
+        system
+            .persistence()
+            .event_store()
+            .head()
+            .await
+            .expect("reading the head of the in-memory journal must succeed"),
+        Some(unannounced),
+        "the unannounced write must be in the journal, left unread rather than lost"
     );
 }
 
@@ -1481,16 +1451,22 @@ async fn the_default_watcher_waits_an_order_of_magnitude_longer_than_a_projector
     );
 }
 
-// Scenario: what a projector settled before a restart does not wake it again
+// Scenario: history from before the activator started does not wake a
+// projector whose position already covers it
 
-/// The projector's recorded position is its stream's second record, but the
-/// streams are interleaved, so that record's global position is not 2. The
-/// watcher starts with no position of its own and replays the whole journal,
-/// reporting both of the projector's records again. They are settled, so the
-/// projector must not be woken for them — once, or over and over each time it
-/// passivates again having read nothing.
+/// The journal and the projector's recorded position are an earlier run's: its
+/// two records, interleaved with another stream's, are covered by the offset,
+/// so the first activation reads nothing and settles nothing. A watcher that
+/// read from the journal's beginning would report both records again, and
+/// nothing this run settled would weigh against them, so the projector would be
+/// woken for them — once, or over and over each time it passivated again having
+/// read nothing. The watcher reads from the journal's head as the activator
+/// started; what lies before it is the first activation's catch-up to read.
+///
+/// The watcher is shown to be running all along by a write it alone can learn
+/// of, appended after the activator started: that one wakes the projector.
 #[tokio::test(start_paused = true)]
-async fn records_settled_before_a_restart_do_not_wake_the_projector_when_replayed() {
+async fn history_from_before_the_activator_started_does_not_wake_a_projector_it_covers() {
     // Given: a journal and a recorded position from an earlier run
     let system = system_on(
         without_default_idle().await,
@@ -1512,7 +1488,8 @@ async fn records_settled_before_a_restart_do_not_wake_the_projector_when_replaye
         .await
         .expect("recording the earlier run's position must succeed");
 
-    // When: the projector is spawned, and the watcher replays the journal
+    // When: the projector is spawned — starting the activator and its watcher —
+    // and the watcher has had reads since
     let projection = Projection::default();
     let handle = ProjectorProps::new(id.clone(), projection.producer())
         .with_event::<Watched>()
@@ -1520,7 +1497,7 @@ async fn records_settled_before_a_restart_do_not_wake_the_projector_when_replaye
         .with_idle_timeout(IdleTimeout::After(IDLE))
         .spawn(&system)
         .await;
-    watcher_has_seen(&system, head).await;
+    watcher_has_had_a_read_past(&system, head).await;
     tokio::time::sleep(QUIET).await;
 
     // Then
@@ -1531,8 +1508,24 @@ async fn records_settled_before_a_restart_do_not_wake_the_projector_when_replaye
     assert_eq!(
         (projection.activations(), projection.applied()),
         (1, 0),
-        "records the projector's recorded position already covers must not activate it \
-         again when the watcher reports them — (activations, applied)"
+        "records from before the activator started, which the projector's recorded \
+         position already covers, must not activate it again — (activations, applied)"
+    );
+
+    // When: a write only the watcher can learn of is appended to its stream
+    append(&earlier_run, &followed, 3, Watched::EVENT_TYPE).await;
+
+    // Then: the watcher, reading on from where it started, wakes the projector
+    projection
+        .counted(
+            1,
+            "the watcher must learn of a write appended after the activator started",
+        )
+        .await;
+    assert_eq!(
+        projection.activations(),
+        2,
+        "the write after the activator started must be projected by a second activation"
     );
 }
 
@@ -1611,10 +1604,13 @@ async fn an_activation_that_fails_is_tried_again_without_another_append() {
 // Scenario: an event a first read could not settle is not left behind
 
 /// The event was journaled before any projector was spawned, so no
-/// notification announced it and the watcher is disabled. The first read hands
-/// it to a projector that refuses it, and the poller waits out its interval —
-/// longer than the idle timeout — before reading again. Only the projector
-/// itself knows the event is owed when the idle timeout stops it.
+/// notification announced it and the watcher is disabled: the activator knows
+/// of nothing owed. The first read hands it to a projector that refuses it, and
+/// the poller waits out its interval — longer than the idle timeout — before
+/// reading again. The activation has then neither settled a batch nor read to
+/// the end of the journal when the idle timeout stops it, so the activator
+/// cannot take the stop for a passivation and activates it again once the
+/// poll interval has passed.
 #[tokio::test(start_paused = true)]
 async fn an_event_the_first_read_could_not_settle_is_read_again_after_an_idle_stop() {
     // Given: an event in the journal, and a projector that refuses it once
@@ -1659,11 +1655,12 @@ async fn an_event_the_first_read_could_not_settle_is_read_again_after_an_idle_st
 // Scenario: a first read that fails is read again after an idle stop
 
 /// The event was journaled before any projector was spawned, so no notification
-/// announced it, and the watcher is disabled. The first reads fail, so no
-/// batch ever reaches the projector to report the event as owed; the poller
-/// waits out an interval longer than the idle timeout before reading again.
-/// Only the poller's own state tells the activator, when the idle timeout stops
-/// the projector, that the journal was not read to its end.
+/// announced it, and the watcher is disabled. The first reads fail, so no batch
+/// ever reaches the projector and no read reaches the end of the journal; the
+/// poller waits out an interval longer than the idle timeout before reading
+/// again. The activation has reported neither a settled batch nor a caught-up
+/// read when the idle timeout stops it, so the activator activates it again
+/// once the poll interval has passed.
 #[tokio::test(start_paused = true)]
 async fn a_first_read_that_fails_is_read_again_after_an_idle_stop() {
     // Given: an event in the journal, and a journal that refuses reads
@@ -1790,86 +1787,377 @@ async fn an_at_most_once_offset_save_that_failed_does_not_repeat_an_event() {
     );
 }
 
-// Scenario: a batch read after the projector stopped is not left behind
+// Scenario: a poller restarted by its supervision starts no second projector
 
-/// The event was journaled before any projector was spawned, so no notification
-/// announced it, and the watcher is disabled. The order is fixed by holding the
-/// activator inside another projection's activation: the projector stops on its
-/// idle timeout while its poller's first read is held, the read then returns
-/// the event and finds nobody to hand it to, and only after that does the
-/// activator handle the projector's `Terminated`. Neither the projector nor an
-/// append ever told the activator of the event; the poller did, when it read it.
+/// The poller's first read panics, which its supervision answers by restarting
+/// it; the restarted poller reads again a poll interval later. A restart is
+/// finished inside the supervised process and ends nothing, so the projector
+/// that owns the poller runs on throughout: nothing may take the restart for
+/// the projector having stopped and start a second one beside it. The
+/// projector has no idle timeout, so no idle stop can be what activates it
+/// again either.
 #[tokio::test(start_paused = true)]
-async fn a_batch_read_after_the_projector_stopped_activates_it_again_at_once() {
-    // Given: an event in the journal, a first read that is held, and an
-    // activator that can be held up
-    let reads = Gate::opened();
-    let offset_loads = Gate::opened();
-    let system = double_gated_system(&reads, &offset_loads).await;
+async fn a_poller_restarted_by_its_supervision_starts_no_second_projector() {
+    // Given: an event in the journal, and a journal whose next read panics
+    let journal_store = PanickyJournal::default();
+    let system = panicky_journal_system(without_default_idle().await, &journal_store);
     let journal = system.event_store();
-    let id = ProjectionId::new("projection-activator-late-batch");
-    let stream = AggregateId::new("projection-activator-late-batch");
-    let before_spawn = append(&journal, &stream, 1, Watched::EVENT_TYPE).await;
-    reads.close();
+    let id = ProjectionId::new("projection-activator-poller-restart");
+    let stream = AggregateId::new("projection-activator-poller-restart");
+    let event = append(&journal, &stream, 1, Watched::EVENT_TYPE).await;
+    journal_store.panic_on_next_load();
+
+    // When: the projector is spawned, its poller's first read panics, and the
+    // restarted poller reads again
     let projection = Projection::default();
-    assert!(IDLE < DEFAULT_POLL_INTERVAL);
-    let _handle = ProjectorProps::new(id.clone(), projection.producer())
+    let handle = ProjectorProps::new(id.clone(), projection.producer())
+        .with_event::<Watched>()
+        .catchup_from_global()
+        .spawn(&system)
+        .await;
+    projection
+        .counted(1, "the restarted poller must hand the event over")
+        .await;
+    assert_eq!(
+        journal_store.panicked(),
+        1,
+        "the poller's first read must have panicked, for its supervision to restart it"
+    );
+    let (system_ref, scope) = (&system, &OffsetScope::from(&id));
+    until("the projector settling the event", move || async move {
+        recorded(system_ref, scope).await == Some(event)
+    })
+    .await;
+    tokio::time::sleep(QUIET).await;
+
+    // Then
+    assert_eq!(
+        (projection.activations(), projection.applied()),
+        (1, 1),
+        "a poller restarted by its supervision must leave the one projector running, so \
+         the event is projected once and no second activation starts — \
+         (activations, applied)"
+    );
+    assert!(
+        handle.is_active().await,
+        "the projector must still be running: its poller's restart is not its stop"
+    );
+}
+
+// Scenario: a stream projector weighs what it is owed in its stream's units
+
+/// The followed stream is written interleaved with another, so its records'
+/// global positions run ahead of their stream sequences: its first record is
+/// the journal's third. A projector following one stream keeps its offset in
+/// that stream's sequence, so what the activator learns of an append to it is
+/// weighed in the same unit. Weighed in global positions against a stream
+/// offset, the settled first record would stay owed (3 past 1), and every idle
+/// stop would activate the projector again to read nothing; weighed the other
+/// way round, the second record (sequence 2) would look settled behind the
+/// first's global position and wake nothing. The watcher is disabled, so every
+/// activation is the notification's doing.
+#[tokio::test(start_paused = true)]
+async fn a_stream_projector_weighs_what_it_is_owed_in_its_streams_units() {
+    // Given: a projector following one stream, written interleaved with another
+    let system = system_on(without_default_idle().await, Watcher::Disabled);
+    let journal = system.event_store();
+    let id = ProjectionId::new("projection-activator-stream-units");
+    let followed = AggregateId::new("projection-activator-stream-units");
+    let other = AggregateId::new("projection-activator-stream-units-other");
+    let projection = Projection::default();
+    let handle = ProjectorProps::new(id.clone(), projection.producer())
+        .with_event::<Watched>()
+        .catchup_from_aggregate(followed.clone())
+        .with_idle_timeout(IdleTimeout::After(IDLE))
+        .spawn(&system)
+        .await;
+    append(&journal, &other, 1, Watched::EVENT_TYPE).await;
+    append(&journal, &other, 2, Watched::EVENT_TYPE).await;
+    let first = append(&journal, &followed, 1, Watched::EVENT_TYPE).await;
+    assert!(
+        first > 1,
+        "the followed stream's first record must lie past global position 1, so its \
+         global position and stream sequence differ"
+    );
+
+    // When: it settles that stream's record and passivates
+    projection
+        .counted(1, "the projector must project its stream's first record")
+        .await;
+    let (system_ref, scope) = (&system, &OffsetScope::from(&id));
+    until(
+        "the projector settling its stream's first record",
+        move || async move { recorded(system_ref, scope).await == Some(1) },
+    )
+    .await;
+    tokio::time::sleep(QUIET).await;
+    let handle_ref = &handle;
+    until(
+        "the projector stopping on its idle timeout",
+        move || async move { !handle_ref.is_active().await },
+    )
+    .await;
+    tokio::time::sleep(QUIET).await;
+
+    // Then: it stays passivated
+    assert_eq!(
+        (projection.activations(), projection.applied()),
+        (1, 1),
+        "a stream projector that settled its stream's record must not be activated again \
+         for it because the record's global position ({first}) is past its stream offset \
+         (1) — (activations, applied)"
+    );
+
+    // When: its stream is appended to again, at sequence 2 — behind the first
+    // record's global position
+    append(&journal, &followed, 2, Watched::EVENT_TYPE).await;
+
+    // Then
+    projection
+        .counted(
+            2,
+            "an append to the followed stream past its settled sequence must wake it",
+        )
+        .await;
+    assert_eq!(
+        projection.activations(),
+        2,
+        "the stream's second record must be projected by a second activation"
+    );
+    until(
+        "the projector settling its stream's second record",
+        move || async move { recorded(system_ref, scope).await == Some(2) },
+    )
+    .await;
+}
+
+// Scenario: a read that failed does not hold back the next append's wake
+
+/// The projector polls every [`LONG_POLL`], so what reads an append inside
+/// [`NUDGED_WITHIN`] is the activator's request to read at once. The first
+/// request's read fails and reports nothing; the next append's request must
+/// still be told.
+#[tokio::test(start_paused = true)]
+async fn a_read_that_failed_does_not_hold_back_the_next_appends_wake() {
+    // Given: a running projector polling every 10 s that has caught up with an
+    // empty journal
+    let journal_store = FlakyJournal::default();
+    let system = flaky_journal_system(without_default_idle().await, &journal_store);
+    let journal = system.event_store();
+    let stream = AggregateId::new("projection-activator-failed-wake");
+    let projection = Projection::default();
+    let _handle = ProjectorProps::new(
+        ProjectionId::new("projection-activator-failed-wake"),
+        projection.producer(),
+    )
+    .with_event::<Watched>()
+    .catchup_from_aggregate(stream.clone())
+    .with_poll_interval(LONG_POLL)
+    .spawn(&system)
+    .await;
+    tokio::time::sleep(QUIET).await;
+    journal_store.fail_loads(true);
+
+    // When: an append is announced and the read it wakes fails
+    append(&journal, &stream, 1, Watched::EVENT_TYPE).await;
+    let journal_store_ref = &journal_store;
+    until(
+        "the read the append woke being refused by the journal",
+        move || async move { journal_store_ref.refused() >= 1 },
+    )
+    .await;
+    tokio::time::sleep(QUIET).await;
+
+    // And: the journal recovers, and another event is appended
+    journal_store.fail_loads(false);
+    let appended_at = Instant::now();
+    append(&journal, &stream, 2, Watched::EVENT_TYPE).await;
+
+    // Then: both are projected without waiting out the poll interval
+    projection
+        .counted(2, "the second append must wake the running projector")
+        .await;
+    let projected_in = appended_at.elapsed();
+    assert!(
+        projected_in < NUDGED_WITHIN,
+        "the events took {projected_in:?} to be projected by a projector polling every \
+         {LONG_POLL:?}; a read that failed must not keep the next append from waking it"
+    );
+}
+
+// Scenario: a re-registered projection's restored offset is not owed again
+
+/// The projection is stopped and spawned again before the watcher's second
+/// read, which is the first to see the event: the registry entry the second
+/// spawn made knows nothing of what the first settled, so it is the offset the
+/// projector restores that tells the activator the event is not owed.
+#[tokio::test(start_paused = true)]
+async fn a_re_registered_projections_restored_offset_is_not_owed_again() {
+    // Given: a projector that projected one event and was stopped through its
+    // handle before the watcher read it
+    let system = system_on(
+        without_default_idle().await,
+        Watcher::Every(WATCHER_INTERVAL),
+    );
+    let journal = system.event_store();
+    let id = ProjectionId::new("projection-activator-re-registered");
+    let stream = AggregateId::new("projection-activator-re-registered");
+    let projection = Projection::default();
+    let handle = ProjectorProps::new(id.clone(), projection.producer())
         .with_event::<Watched>()
         .catchup_from_global()
         .with_idle_timeout(IdleTimeout::After(IDLE))
         .spawn(&system)
         .await;
+    tokio::time::sleep(PROBE_STEP * 4).await;
+    append(&journal, &stream, 1, Watched::EVENT_TYPE).await;
+    projection
+        .counted(1, "the projector must project the event")
+        .await;
+    let (system_ref, scope) = (&system, &OffsetScope::from(&id));
+    until("the projector settling the event", move || async move {
+        recorded(system_ref, scope).await == Some(1)
+    })
+    .await;
+    tokio::time::timeout(PROBE_TIMEOUT, handle.stop())
+        .await
+        .expect("stopping through the handle must finish once the projector has stopped");
 
-    // When: the activator is held inside another projection's activation, and
-    // the projector stops on its idle timeout
-    offset_loads.close();
-    let other = Projection::default();
-    let other_system = system.clone();
-    let spawning_other = tokio::spawn(async move {
-        ProjectorProps::new(
-            ProjectionId::new("projection-activator-late-batch-other"),
-            other.producer(),
-        )
+    // When: the projection is spawned again, and the watcher reads the event
+    let handle = ProjectorProps::new(id.clone(), projection.producer())
         .with_event::<Watched>()
         .catchup_from_global()
-        .spawn(&other_system)
-        .await
-    });
-    tokio::time::sleep(QUIET).await;
+        .with_idle_timeout(IdleTimeout::After(IDLE))
+        .spawn(&system)
+        .await;
+    tokio::time::sleep(WATCHER_INTERVAL * 3).await;
 
-    // And: its poller's read returns the event, with the projector gone
-    reads.open();
-    tokio::time::sleep(QUIET).await;
+    // Then: the event it restored its offset past does not activate it again
+    let (activations, applied) = (projection.activations(), projection.applied());
+    tokio::time::sleep(WATCHER_INTERVAL * 3).await;
     assert_eq!(
-        projection.applied(),
-        0,
-        "the projector stopped before the batch reached it"
+        (projection.activations(), projection.applied()),
+        (activations, applied),
+        "an event the restored offset covers must not have the projector activated again and \
+         again — (activations, applied)"
     );
+    assert_eq!(
+        (activations, applied),
+        (2, 1),
+        "the projection must have been activated once for each spawn, and projected the \
+         event once — (activations, applied)"
+    );
+    assert!(!handle.is_active().await);
+}
 
-    // And: only then the activator handles the projector's `Terminated`
-    let released = Instant::now();
-    offset_loads.open();
-    let _other_handle = spawning_other
+// Scenario: an offset that could not be loaded is loaded again after an idle
+// stop, though the journal is empty
+
+/// With nothing in the journal the poller's read finds nothing, whether or not
+/// the offset was loaded; that is not what the activator may take for a first
+/// activation settled, or the projector would never be started again.
+#[tokio::test(start_paused = true)]
+async fn an_offset_that_could_not_be_loaded_is_loaded_again_though_the_journal_is_empty() {
+    // Given: an empty journal, and an offset store that refuses loads
+    let offsets = FlakyOffsets::default();
+    let system = flaky_system(without_default_idle().await, &offsets);
+    offsets.fail_loads(true);
+    let projection = Projection::default();
+
+    // When: a projector is spawned, and stops on its idle timeout
+    assert!(IDLE < DEFAULT_POLL_INTERVAL);
+    let handle = ProjectorProps::new(
+        ProjectionId::new("projection-activator-empty-journal"),
+        projection.producer(),
+    )
+    .with_event::<Watched>()
+    .catchup_from_global()
+    .with_idle_timeout(IdleTimeout::After(IDLE))
+    .spawn(&system)
+    .await;
+    let handle_ref = &handle;
+    until(
+        "the projector stopping on its idle timeout",
+        move || async move { !handle_ref.is_active().await },
+    )
+    .await;
+
+    // And: the offset store recovers, with nothing appended
+    let offsets_ref = &offsets;
+    until(
+        "the activation being tried again against the failing store",
+        move || async move { offsets_ref.refused() >= 2 },
+    )
+    .await;
+    offsets.fail_loads(false);
+
+    // Then: the activator starts the projector again, which builds its projector
+    let projection_ref = &projection;
+    until(
+        "the projector being started with the recovered offset",
+        move || async move { projection_ref.activations() >= 1 },
+    )
+    .await;
+}
+
+// Scenario: a watcher whose head could not be read passes over no write
+
+/// The head is refused as the activator starts, and the projector passivates
+/// after its first catch-up. A write the system's journal is not told of is
+/// made before the watcher's interval has passed; a watcher that started at the
+/// head it read an interval later would start past it.
+#[tokio::test(start_paused = true)]
+async fn a_watcher_whose_head_could_not_be_read_passes_over_no_write() {
+    // Given: a journal whose head is refused as the activator starts
+    let journal_store = HeadlessAtFirst::default();
+    let system = EventSourceSystem::builder(without_default_idle().await)
+        .with_persistence(PersistenceProvider::<HeadlessAtFirstStore>::new(
+            CustomStore::builder()
+                .eventstore(journal_store.clone())
+                .projection_offsets(InMemoryOffsetStore::default())
+                .build(),
+        ))
+        .with_projection_watcher_interval(WATCHER_INTERVAL)
+        .build();
+    let stream = AggregateId::new("projection-activator-headless");
+    let projection = Projection::default();
+    let handle = ProjectorProps::new(
+        ProjectionId::new("projection-activator-headless"),
+        projection.producer(),
+    )
+    .with_event::<Watched>()
+    .catchup_from_global()
+    .with_idle_timeout(IdleTimeout::After(IDLE))
+    .spawn(&system)
+    .await;
+    let handle_ref = &handle;
+    until(
+        "the projector stopping on its idle timeout",
+        move || async move { !handle_ref.is_active().await },
+    )
+    .await;
+
+    // When: a write nothing announced is made, within the watcher's interval
+    assert!(QUIET < WATCHER_INTERVAL);
+    tokio::time::sleep(QUIET).await;
+    journal_store
+        .append(
+            stream.as_str(),
+            vec![AppendingEvent {
+                sequence: 1,
+                event_type: Watched::EVENT_TYPE,
+                payload: Bytes::new(),
+                occurred_at: jiff::Timestamp::now(),
+            }],
+        )
         .await
-        .expect("spawning the other projector must not panic");
+        .expect("appending to the in-memory journal must succeed");
 
-    // Then: the projector is activated again at once, not after its poll
-    // interval, and projects the event
+    // Then: the watcher finds it and the projector projects it
     projection
         .counted(
             1,
-            "the activator must activate again for the event the poller read",
+            "the watcher must pick up the write made after the head was refused",
         )
         .await;
-    assert!(
-        released.elapsed() < DEFAULT_POLL_INTERVAL,
-        "the event was owed from the moment it was read, so the projector must not \
-         wait out its poll interval; took {:?}",
-        released.elapsed()
-    );
-    let (system_ref, scope) = (&system, &OffsetScope::from(&id));
-    until("the projector settling the event", move || async move {
-        recorded(system_ref, scope).await == Some(before_spawn)
-    })
-    .await;
 }

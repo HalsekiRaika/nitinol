@@ -14,8 +14,8 @@ use nitinol_runtime::{ProcessSystem, Props, Stream};
 use crate::durable_stream::batch::{PolledBatch, SettledThrough};
 use crate::durable_stream::cursor::SequenceCursor;
 use crate::durable_stream::poller::{
-    BatchPollerProcess, DirectPollerProcess, DurablePollerProcess, IntervalDriver, Nudge, Poll,
-    PollerLink, SharedPollState, TransformFn,
+    BatchPollerProcess, DirectPollerProcess, DurablePollerProcess, IntervalDriver, Poll,
+    ReachedEnd, SharedPollState, TransformFn,
 };
 
 const POLLER_RESTART_MAX_RETRIES: u32 = 5;
@@ -81,12 +81,11 @@ where
         &self,
         make: impl Fn() -> Pl + Send + Sync + 'static,
         name: Option<ProcessName>,
-        nudge: Option<Nudge>,
     ) -> Props![Pl; IntervalDriver]
     where
         Pl: Poll,
     {
-        let driver = IntervalDriver::<Pl>::new(self.poll_interval, nudge);
+        let driver = IntervalDriver::<Pl>::new(self.poll_interval);
         let restart_strategy =
             SupervisionStrategy::restart(POLLER_RESTART_MAX_RETRIES, POLLER_RESTART_WITHIN)
                 .expect("POLLER_RESTART_WITHIN is a positive duration constant");
@@ -121,7 +120,6 @@ where
                 cursor: cursor.clone(),
             },
             name,
-            None,
         )
     }
 
@@ -145,31 +143,30 @@ where
     }
 
     /// Spawn a poller over `journal` as a runtime **child** of `ctx`'s process
-    /// that hands `subscriber` each read as one [`PolledBatch`] of at most
-    /// `batch_limit` records, instead of a record at a time.
+    /// that hands it each read as one [`PolledBatch`] of at most `batch_limit`
+    /// records, instead of a record at a time.
     ///
-    /// The parent and the subscriber are separated as in
-    /// [`Self::spawn_child_for`]: the poller stops with `ctx`'s process, and
-    /// with `subscriber` when that is another process. Supervision and the
-    /// interval are those of [`Self::spawn_child`]; what differs is the unit of
-    /// delivery, that a read which came back full and settled whole is followed
-    /// by the next one at once, and that, given a `link`, a read is also started
-    /// as soon as it is nudged and each read is reported to it. This is the
-    /// road a projector takes, so it can settle a read as one unit.
-    pub(crate) async fn spawn_batch_child_for<Parent, Sub>(
+    /// The lifetime, supervision and interval are those of
+    /// [`Self::spawn_child`]; what differs is the unit of delivery, that a read
+    /// which came back full and settled whole is followed by the next one at
+    /// once, that the poller reads at once when told
+    /// [`ReadNow`](super::poller::ReadNow), and that it tells `ctx`'s process
+    /// [`ReachedEnd`] the first time a read finds nothing. This is the road a
+    /// projector takes, so it can settle a read as one unit.
+    pub(crate) async fn spawn_batch_child<S>(
         &self,
-        ctx: &mut ProcessContext<Parent>,
+        ctx: &mut ProcessContext<S>,
         journal: Journal,
-        subscriber: ProcessProxy<Sub>,
         cursor: SequenceCursor,
         batch_limit: NonZeroUsize,
-        link: Option<PollerLink>,
-    ) where
-        Parent: Process,
-        Sub: Process + Receive<PolledBatch<T>, Response = SettledThrough>,
+    ) -> ProcessProxy<BatchPollerProcess<T, S>>
+    where
+        S: Process
+            + Receive<PolledBatch<T>, Response = SettledThrough>
+            + Receive<ReachedEnd, Response = ()>,
     {
+        let subscriber = ctx.self_proxy().clone();
         let transform = Arc::clone(&self.transform);
-        let nudge = link.as_ref().map(|link| link.nudge.clone());
         let props = self.poller_props(
             move || BatchPollerProcess {
                 store: journal.clone(),
@@ -177,12 +174,11 @@ where
                 transform: Arc::clone(&transform),
                 cursor: cursor.clone(),
                 batch_limit,
-                reads: link.as_ref().map(|link| Arc::clone(&link.reads)),
+                reported_end: false,
             },
             None,
-            nudge,
         );
-        ctx.spawn_child(props).await;
+        ctx.spawn_child(props).await
     }
 
     /// Spawn a `DirectPollerProcess` as a runtime **child** of `ctx`'s process,

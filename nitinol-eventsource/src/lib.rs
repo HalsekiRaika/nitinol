@@ -101,7 +101,9 @@
 //! [`ProjectorProps::with_idle_timeout`]. The system's projection activator
 //! starts it again when an event it follows is appended: at once for an append
 //! through the system's own journal, and within the projection watcher's
-//! interval for one by another writer to the same store.
+//! interval for one by another writer to the same store. The watcher reads
+//! from the journal's end as the activator started; what was written before is
+//! read by each projector's own catch-up from its recorded offset.
 //!
 //! # Observing lost races
 //!

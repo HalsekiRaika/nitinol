@@ -16,13 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - (`nitinol-eventsource`): a projection activator, one per `EventSourceSystem`
   and started by the first projector spawn, keeps every projection spawned on
   the system and starts its projector again when an event it follows is
-  appended, so a projector may passivate. Appends through the system's own
-  journal wake it at once; appends by other writers are found by a watcher that
-  reads the journal every 10 s, set with
+  appended, so a projector may passivate. Projectors stay top-level processes
+  that the activator watches, each reading its own offset as it starts.
+  Appends through the system's own journal wake a projector at once; appends
+  by other writers are found by a watcher that reads the journal every 10 s
+  from where it stood when the activator started, set with
   `EventSourceSystemBuilder::with_projection_watcher_interval` or turned off
-  with `EventSourceSystemBuilder::without_projection_watcher`.
-  `EventSourceSystem::event_store` is the system's journal, observed by the
-  activator.
+  with `EventSourceSystemBuilder::without_projection_watcher`. The watcher
+  keeps no position in the offset store. `EventSourceSystem::event_store` is
+  the system's journal, observed by the activator.
 - (`nitinol-eventsource`): `ProjectorProps::with_idle_timeout` sets the idle
   timeout a projector stops on; it defaults to the system default. A
   passivated projector is rebuilt from its producer and catches up from its
@@ -55,6 +57,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and waits for its projector to end. Spawning a projection id the system
   already has joins it rather than starting a second projector.
 - (`nitinol-eventsource`): `ProjectorProcess` is no longer public.
+- (`nitinol-eventsource`): `ProjectorProps::spawn` no longer panics when the
+  offset store fails to load the projection's offset; the projector loads it
+  again with each batch its poller reads, and projects nothing until a load
+  succeeds.
 
 ### Fixed
 

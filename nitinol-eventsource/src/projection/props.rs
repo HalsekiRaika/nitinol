@@ -296,11 +296,9 @@ where
         };
 
         let activator = system.projection_activator().await;
-        activator
-            .ask(Register(Box::new(declaration)))
-            .await
-            .expect("the projection activator is persistent and resumes, so it answers every registration")
-            .expect("offset load must succeed before projector spawn");
+        activator.ask(Register(Box::new(declaration))).await.expect(
+            "the projection activator is persistent and resumes, so it answers every registration",
+        );
         ProjectorHandle::new(projection_id, activator)
     }
 }
@@ -349,9 +347,8 @@ where
     ///
     /// # Panics
     ///
-    /// Panics if the offset store fails to load the position recorded for this
-    /// projection, or if the system's projection activator has ended — which
-    /// only the process system shutting down does.
+    /// Panics if the system's projection activator has ended — which only the
+    /// process system shutting down does.
     pub async fn spawn<St>(self, system: &EventSourceSystem<St>) -> ProjectorHandle
     where
         St: ProjectionOffsetSlot,
@@ -376,9 +373,8 @@ where
     ///
     /// # Panics
     ///
-    /// Panics if the offset store fails to load the position recorded for this
-    /// projection, or if the system's projection activator has ended — which
-    /// only the process system shutting down does.
+    /// Panics if the system's projection activator has ended — which only the
+    /// process system shutting down does.
     pub async fn spawn(self) -> ProjectorHandle {
         let host = self.host.system().clone();
         self.start_on(&host).await

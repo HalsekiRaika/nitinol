@@ -1,18 +1,26 @@
+use std::convert::Infallible;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
-use nitinol_persistence::store::{DeliveryMode, OffsetScope, OffsetStore};
+use nitinol_persistence::error::OffsetError;
+use nitinol_persistence::store::{DeliveryMode, Journal, OffsetScope, OffsetStore};
 use nitinol_persistence::{AggregateId, LoadedEvent};
+use nitinol_runtime::process::{Process, ProcessContext, ProcessProxy, Receive};
 
-use crate::projection::ProjectionId;
-use nitinol_runtime::process::{Process, ProcessContext, Receive};
-
-use crate::durable_stream::{PolledBatch, SettledThrough};
+use crate::durable_stream::{
+    BatchPollerProcess, DurableSubscription, PolledBatch, ReachedEnd, ReadNow, SequenceCursor,
+    SettledThrough,
+};
 use crate::error::ProjectionNotSettled;
-use crate::projection::activator::Progress;
+use crate::projection::activator::{
+    CaughtUp, OffsetRestored, ProjectionActivator, ReadTakenUp, Settled,
+};
 use crate::projection::delivery::{self, Batch, BatchOutcome, BatchRecord, ProjectionIdentity};
 use crate::projection::handler::EventTypeHandler;
 use crate::projection::tx_provider::ErasedTxProvider;
+use crate::projection::ProjectionId;
 
 /// Specifies which sequence dimension drives offset advancement.
 #[derive(Clone)]
@@ -29,26 +37,41 @@ type Projection<P, Tx> = (Arc<dyn EventTypeHandler<P, Tx>>, Bytes);
 /// The running projector: it receives what each read of its journal returned
 /// as one batch, and settles that batch as one unit under its delivery mode.
 ///
-/// The poller that reads for it is its sibling under the projection
-/// activator, not its child: a projector stopping on its idle timeout waits for
-/// its children, and a poller of its own could be waiting on it for an answer
-/// at that very moment.
+/// - It is a top-level process, and the poller that reads for it is its child.
+/// - It reads its own offset as it starts, and builds the projector from the
+///   producer only once that read succeeded. A read that fails is tried again
+///   with every batch the poller hands over, and the batch is refused until
+///   one succeeds; the poller reads from the journal's start meanwhile, and
+///   what the offset turns out to cover is skipped.
+/// - It tells the projection activator the offset it started from, how far
+///   each batch settled, when its poller first found nothing to read, and when
+///   it took up a request to read at once: what the activator weighs when this
+///   projector stops, and when it asks for a read.
 pub(crate) struct ProjectorProcess<P, Cs, Tx = ()> {
-    pub(crate) projector: P,
     pub(crate) projection_id: ProjectionId,
     /// Built once, when this projector is spawned: the key its position is
     /// filed under never changes while it runs.
     pub(crate) offset_scope: OffsetScope,
+    pub(crate) journal: Journal,
     pub(crate) offset_store: Cs,
     pub(crate) delivery_mode: DeliveryMode,
     pub(crate) catchup_origin: CatchupOrigin,
+    pub(crate) producer: Arc<dyn Fn() -> P + Send + Sync>,
     pub(crate) handlers: Vec<Arc<dyn EventTypeHandler<P, Tx>>>,
     pub(crate) tx_provider: Option<Arc<dyn ErasedTxProvider<Tx> + Send + Sync>>,
-    pub(crate) offset_sequence: u64,
-    /// How far through the journal, in global positions, this projection has
-    /// settled and what it is known to be owed, as the activator weighs it when
-    /// the projector stops.
-    pub(crate) progress: Progress,
+    pub(crate) poll_interval: Duration,
+    pub(crate) batch_limit: NonZeroUsize,
+    pub(crate) activator: ProcessProxy<ProjectionActivator>,
+    /// `None` until the offset has been read.
+    pub(crate) restored: Option<Restored<P>>,
+    /// The child reading the journal; `None` until `on_start` spawned it.
+    pub(crate) poller: Option<ProcessProxy<BatchPollerProcess<LoadedEvent, Self>>>,
+}
+
+/// The projector and the offset it was built at, which only exist together.
+pub(crate) struct Restored<P> {
+    projector: P,
+    offset: u64,
 }
 
 impl<P, Cs, Tx> Process for ProjectorProcess<P, Cs, Tx>
@@ -57,13 +80,66 @@ where
     Cs: OffsetStore<Tx = Tx> + Send + Sync + 'static,
     Tx: Send + 'static,
 {
+    async fn on_start(&mut self, ctx: &mut ProcessContext<Self>) {
+        let after = match self.restore().await {
+            Ok(offset) => offset,
+            Err(error) => {
+                tracing::warn!(
+                    projection_id = ?self.projection_id,
+                    error = %error,
+                    "projector: loading the recorded offset failed; it is loaded again with \
+                     the first batch read"
+                );
+                0
+            }
+        };
+        let cursor = match &self.catchup_origin {
+            CatchupOrigin::Aggregate(stream) => SequenceCursor::Stream {
+                key: stream.as_str().to_owned(),
+                after,
+            },
+            CatchupOrigin::Global => SequenceCursor::Global { after },
+        };
+        let poller = DurableSubscription::<LoadedEvent>::new(Some)
+            .with_poll_interval(self.poll_interval)
+            .spawn_batch_child(ctx, self.journal.clone(), cursor, self.batch_limit)
+            .await;
+        self.poller = Some(poller);
+    }
 }
 
 impl<P, Cs, Tx> ProjectorProcess<P, Cs, Tx>
 where
     P: Send + Sync + 'static,
+    Cs: OffsetStore<Tx = Tx> + Send + Sync + 'static,
     Tx: Send + 'static,
 {
+    /// The offset this projector was built at, reading it — and building the
+    /// projector — if that has not succeeded yet.
+    async fn restore(&mut self) -> Result<u64, OffsetError> {
+        if let Some(restored) = &self.restored {
+            return Ok(restored.offset);
+        }
+        let offset = self
+            .offset_store
+            .load(&self.offset_scope)
+            .await?
+            .unwrap_or(0);
+        self.restored = Some(Restored {
+            projector: (self.producer)(),
+            offset,
+        });
+        // What the offset covers was settled before this activation, which the
+        // activator weighs a stop against: it has not seen it if this projection
+        // was registered again after an earlier one reported it.
+        self.report(OffsetRestored {
+            id: self.projection_id.clone(),
+            through: offset,
+        })
+        .await;
+        Ok(offset)
+    }
+
     /// Where `loaded` stands in the dimension this projector's offset is kept
     /// in.
     fn position_of(&self, loaded: &LoadedEvent) -> u64 {
@@ -73,14 +149,14 @@ where
         }
     }
 
-    /// Whether `loaded` is owed a handler's run, and which one.
-    fn classify(&self, loaded: LoadedEvent) -> BatchRecord<Projection<P, Tx>> {
+    /// Whether `loaded` is owed a handler's run past `offset`, and which one.
+    fn classify(&self, offset: u64, loaded: LoadedEvent) -> BatchRecord<Projection<P, Tx>> {
         let position = self.position_of(&loaded);
 
         // Already applied by this or an earlier incarnation.  Nothing is owed
         // for it, and reporting it as unsettled would hold the cursor on a
         // redelivery that can never produce anything new.
-        if position <= self.offset_sequence {
+        if position <= offset {
             return BatchRecord::Skipped { position };
         }
 
@@ -105,34 +181,20 @@ where
             }
         }
     }
-}
 
-/// A record of a batch as the activator weighs it.
-struct TrackedRecord {
-    /// In the dimension the projector's offset is kept in.
-    position: u64,
-    global: u64,
-    /// Whether a handler is to run for it.
-    owed: bool,
-}
-
-impl<P, Cs, Tx> ProjectorProcess<P, Cs, Tx> {
-    /// Tell the activator how far `records` settled, and which of them stay
-    /// owed: all of a batch that did not settle, the part behind `settled_through`
-    /// of one that settled in part.
-    fn report_progress(&self, records: &[TrackedRecord], settled_through: Option<u64>) {
-        let settled =
-            |record: &&TrackedRecord| settled_through.is_some_and(|t| record.position <= t);
-        if let Some(global) = records.iter().filter(settled).map(|r| r.global).max() {
-            self.progress.settle_through(global);
-        }
-        let owed = records
-            .iter()
-            .filter(|r| r.owed && !settled(r))
-            .map(|r| r.global)
-            .max();
-        if let Some(global) = owed {
-            self.progress.learn_of(global);
+    /// Tell the activator `message`. The activator runs as long as the
+    /// process system does, so a refusal only comes while that shuts down.
+    async fn report<M>(&self, message: M)
+    where
+        ProjectionActivator: Receive<M>,
+        M: Send + Sync + 'static,
+    {
+        if let Err(error) = self.activator.tell(message).await {
+            tracing::debug!(
+                projection_id = ?self.projection_id,
+                error = %error,
+                "projector: the projection activator has stopped; progress is not reported"
+            );
         }
     }
 }
@@ -157,27 +219,31 @@ where
         batch: PolledBatch<LoadedEvent>,
         _ctx: &mut ProcessContext<Self>,
     ) -> Result<SettledThrough, ProjectionNotSettled> {
+        let offset = match self.restore().await {
+            Ok(offset) => offset,
+            Err(error) => {
+                tracing::warn!(
+                    projection_id = ?self.projection_id,
+                    error = %error,
+                    "projector: loading the recorded offset failed; the batch is read again"
+                );
+                return Err(ProjectionNotSettled);
+            }
+        };
+
         // The poller observed each record in the dimension its cursor was
         // built for from this projector's own origin; the position is read off
         // the record here, in the dimension this projector's offset is kept in.
-        // Each record's global position is kept alongside, because what the
-        // activator weighs against is global whatever this projector's origin.
-        let mut tracked = Vec::with_capacity(batch.records.len());
         let records = batch
             .records
             .into_iter()
-            .map(|(_observed, loaded)| {
-                let (position, global) = (self.position_of(&loaded), loaded.global_sequence);
-                let record = self.classify(loaded);
-                tracked.push(TrackedRecord {
-                    position,
-                    global,
-                    owed: matches!(record, BatchRecord::ToProject { .. }),
-                });
-                record
-            })
+            .map(|(_observed, loaded)| self.classify(offset, loaded))
             .collect();
 
+        let restored = self
+            .restored
+            .as_mut()
+            .expect("restore() above answered the offset, so the projector is built");
         let outcome = delivery::apply_batch(
             self.delivery_mode,
             &self.offset_store,
@@ -190,7 +256,7 @@ where
                 last_observed: batch.last_observed,
             },
             self.tx_provider.as_deref(),
-            &mut self.projector,
+            &mut restored.projector,
             |projector, (handler, payload), ctx| {
                 Box::pin(async move {
                     tokio::task::yield_now().await;
@@ -203,29 +269,93 @@ where
         // Both the offset this projector carries forward and the answer the
         // poller reads come from this one outcome.  Deciding them separately is
         // how the cursor came to move past events the offset had not.
-        let settled_through = match outcome {
-            BatchOutcome::Settled { through } => Some(through),
-            BatchOutcome::Unsettled => None,
-        };
-        // Before the answer, so that by the time this projector can stop, the
-        // activator reads what it settled and what it still owes: the poller
-        // holds its cursor there and reads those records again only at its
-        // next tick, which an idle timeout may precede.
-        self.report_progress(&tracked, settled_through);
-
-        // Both the offset this projector carries forward and the answer the
-        // poller reads come from this one outcome.  Deciding them separately is
-        // how the cursor came to move past events the offset had not.
-        match settled_through {
-            Some(through) => {
+        match outcome {
+            BatchOutcome::Settled { through } => {
                 // A batch of nothing but records the offset already covers
                 // settles through a position at or below it; the offset never
                 // moves back.
-                self.offset_sequence = self.offset_sequence.max(through);
+                restored.offset = restored.offset.max(through);
+                self.report(Settled {
+                    id: self.projection_id.clone(),
+                    through,
+                })
+                .await;
                 Ok(SettledThrough(through))
             }
-            None => Err(ProjectionNotSettled),
+            BatchOutcome::Unsettled => Err(ProjectionNotSettled),
         }
+    }
+}
+
+impl<P, Cs, Tx> Receive<ReadNow> for ProjectorProcess<P, Cs, Tx>
+where
+    P: Send + Sync + 'static,
+    Cs: OffsetStore<Tx = Tx> + Send + Sync + 'static,
+    Tx: Send + 'static,
+{
+    type Response = ();
+    type Error = Infallible;
+
+    /// Passed on to the poller, which reads at once.
+    async fn recv(
+        &mut self,
+        msg: ReadNow,
+        _ctx: &mut ProcessContext<Self>,
+    ) -> Result<(), Infallible> {
+        if let Some(poller) = &self.poller {
+            // A poller that has given up restarting reads no more; the
+            // activator weighs what this projection is owed when it stops.
+            if let Err(error) = poller.tell(msg).await {
+                tracing::debug!(
+                    projection_id = ?self.projection_id,
+                    error = %error,
+                    "projector: its poller has stopped; the read is not started"
+                );
+            }
+        }
+        // Reported whatever the read comes to, so that one that fails does not
+        // keep the activator from asking for the next.
+        self.report(ReadTakenUp {
+            id: self.projection_id.clone(),
+        })
+        .await;
+        Ok(())
+    }
+}
+
+impl<P, Cs, Tx> Receive<ReachedEnd> for ProjectorProcess<P, Cs, Tx>
+where
+    P: Send + Sync + 'static,
+    Cs: OffsetStore<Tx = Tx> + Send + Sync + 'static,
+    Tx: Send + 'static,
+{
+    type Response = ();
+    type Error = Infallible;
+
+    /// Reported only once the offset is known: a read that found nothing from
+    /// an unknown offset says nothing of what this activation settled, and
+    /// reporting it would have the activator take the activation for one that
+    /// needs no second try.
+    async fn recv(
+        &mut self,
+        _msg: ReachedEnd,
+        _ctx: &mut ProcessContext<Self>,
+    ) -> Result<(), Infallible> {
+        match self.restore().await {
+            Ok(_offset) => {
+                self.report(CaughtUp {
+                    id: self.projection_id.clone(),
+                })
+                .await;
+            }
+            Err(error) => tracing::warn!(
+                projection_id = ?self.projection_id,
+                error = %error,
+                "projector: loading the recorded offset failed; the end of the journal is not \
+                 reported"
+            ),
+        }
+        Ok(())
     }
 }
 
@@ -237,7 +367,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use async_trait::async_trait;
-    use nitinol_persistence::store::InMemoryOffsetStore;
+    use nitinol_persistence::store::{InMemoryEventStore, InMemoryOffsetStore};
     use nitinol_persistence::{EventType, Family, TypeName};
     use nitinol_runtime::{ProcessSystem, Props};
 
@@ -298,30 +428,45 @@ mod tests {
     async fn already_processed_event_is_accepted_without_projecting() {
         let stream = AggregateId::new("duplicate-agg");
         let projection_id = ProjectionId::new("duplicate");
+        let offset_scope = OffsetScope::from(&projection_id);
+        let offset_store = InMemoryOffsetStore::default();
+        offset_store
+            .save(&offset_scope, 5, None)
+            .await
+            .expect("recording an earlier incarnation's offset must succeed");
         let projected = Arc::new(AtomicU64::new(0));
         let handler: Arc<dyn EventTypeHandler<CountingProjector, ()>> =
             Arc::new(ConcreteHandler::<CountingProjector, Noted> {
                 _phantom: PhantomData,
             });
+        let system = ProcessSystem::new().await;
+        let activator = ProjectionActivator::spawn(&system, None).await;
         let projector = {
             let projected = Arc::clone(&projected);
             let stream = stream.clone();
             Props::new(move || ProjectorProcess {
-                projector: CountingProjector {
-                    projected: Arc::clone(&projected),
-                },
-                offset_scope: OffsetScope::from(&projection_id),
                 projection_id: projection_id.clone(),
-                offset_store: InMemoryOffsetStore::default(),
+                offset_scope: offset_scope.clone(),
+                journal: Journal::from(InMemoryEventStore::default()),
+                offset_store: offset_store.clone(),
                 delivery_mode: DeliveryMode::AtLeastOnce,
                 catchup_origin: CatchupOrigin::Aggregate(stream.clone()),
+                producer: {
+                    let projected = Arc::clone(&projected);
+                    Arc::new(move || CountingProjector {
+                        projected: Arc::clone(&projected),
+                    })
+                },
                 handlers: vec![Arc::clone(&handler)],
                 tx_provider: None,
-                offset_sequence: 5,
-                progress: Progress::default(),
+                poll_interval: crate::DEFAULT_POLL_INTERVAL,
+                batch_limit: crate::DEFAULT_BATCH_LIMIT,
+                activator: activator.clone(),
+                restored: None,
+                poller: None,
             })
         };
-        let projector = ProcessSystem::new().await.spawn(projector).await;
+        let projector = system.spawn(projector).await;
 
         let already_processed = LoadedEvent {
             stream_key: stream.as_str().to_owned(),

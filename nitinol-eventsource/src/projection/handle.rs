@@ -32,9 +32,13 @@ impl ProjectorHandle {
     /// `false` while the projection is passivated — its projector stopped on
     /// its idle timeout, to be activated again by the next event it follows —
     /// and after [`stop`](Self::stop).
+    ///
+    /// Asked of the activator rather than read off a process: the handle names
+    /// a projection, not a process, and the activator is what knows which
+    /// projector, if any, runs for it.
     pub async fn is_active(&self) -> bool {
-        // Every projector is a child of the activator, so where the activator
-        // cannot be reached no projector of this system runs.
+        // The activator is unreachable only while the process system shuts
+        // down, its projectors with it.
         self.activator
             .ask(IsActive(self.projection_id.clone()))
             .await
@@ -52,12 +56,12 @@ impl ProjectorHandle {
             .ask(Unregister(self.projection_id.clone()))
             .await
         else {
-            // Either no projector was running, or the activator — and with it
-            // every projector it started — has already ended.
+            // Either no projector was running, or the activator has already
+            // ended, which only the process system shutting down does.
             return;
         };
-        // Dropped unanswered only if the activator ended, taking the projector
-        // with it.
+        // Dropped unanswered only if the activator ended, which only the
+        // process system shutting down does.
         let _ = stopped.await;
     }
 }

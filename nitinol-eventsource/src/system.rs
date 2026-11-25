@@ -21,7 +21,7 @@ use crate::durable_stream::{CursorUnset, DurableStream};
 use crate::process::resolve::{AggregateRegistry, ResolveHandle};
 use crate::process::{RecoverOn, SnapshotPersistor, SnapshotPersistorProxy};
 use crate::projection::activator::{
-    ActivatorObserver, ProjectionActivator, WatcherSetting, WatcherSource,
+    ActivatorNotifier, ProjectionActivator, WatcherSetting, WatcherSource,
 };
 use crate::projection::ProjectorProps;
 use crate::{AggregateProps, AggregateProxy};
@@ -138,7 +138,9 @@ impl<St: Store> EventSourceSystemBuilder<PersistenceProvider<St>> {
     /// [`event_store`][EventSourceSystem::event_store] append wakes a projector
     /// at once, so the interval only bounds how late such a foreign write is
     /// projected while its projector is passivated. The watcher runs once the
-    /// first projector is spawned, starting an interval later.
+    /// first projector is spawned, and reads from the journal's head as it
+    /// stood then: what was written before is read by each projector's own
+    /// catch-up when it is first activated.
     pub fn with_projection_watcher_interval(mut self, interval: Duration) -> Self {
         self.projection_watcher = WatcherSetting::Every(interval);
         self
@@ -231,26 +233,26 @@ struct NodeInner {
     /// projector spawn.
     ///
     /// One per node, so that a projection id names one registration however
-    /// many clones of the system spawn it. Shared with `append_observer`,
+    /// many clones of the system spawn it. Shared with `append_notifier`,
     /// which reads it to find the activator to tell.
     projection_activator: Arc<OnceCell<ProcessProxy<ProjectionActivator>>>,
     /// What every journal this node hands out reports its appends to, and what
     /// tells them to the activator once it runs.
-    append_observer: Arc<ActivatorObserver>,
+    append_notifier: Arc<ActivatorNotifier>,
     projection_watcher: WatcherSetting,
 }
 
 impl Node {
     fn new(ps: ProcessSystem, projection_watcher: WatcherSetting) -> Self {
         let projection_activator = Arc::new(OnceCell::new());
-        let append_observer = Arc::new(ActivatorObserver::new(Arc::clone(&projection_activator)));
+        let append_notifier = Arc::new(ActivatorNotifier::new(Arc::clone(&projection_activator)));
         Self {
             inner: Arc::new(NodeInner {
                 ps,
                 registry: AggregateRegistry::new(),
                 snapshot_persistor: OnceCell::new(),
                 projection_activator,
-                append_observer,
+                append_notifier,
                 projection_watcher,
             }),
         }
@@ -259,7 +261,7 @@ impl Node {
     /// `journal`, reporting every append it accepts to this node's projection
     /// activator.
     fn observed(&self, journal: Journal) -> Journal {
-        journal.observed_by(Arc::clone(&self.inner.append_observer) as _)
+        journal.observed_by(Arc::clone(&self.inner.append_notifier) as _)
     }
 
     /// This node's projection activator, starting it on the first call.
@@ -591,13 +593,7 @@ impl<St: ProjectionOffsetSlot> EventSourceSystem<St> {
     pub(crate) async fn projection_activator(&self) -> ProcessProxy<ProjectionActivator> {
         self.inner
             .node
-            .projection_activator(|interval| {
-                WatcherSource::new(
-                    self.event_store(),
-                    self.persistence().projection_offsets(),
-                    interval,
-                )
-            })
+            .projection_activator(|interval| WatcherSource::new(self.event_store(), interval))
             .await
     }
 }

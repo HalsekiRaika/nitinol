@@ -16,6 +16,8 @@ pub(crate) struct Appended {
     pub(crate) key: Arc<str>,
     /// The global position of the append's last event.
     pub(crate) head: u64,
+    /// The stream's sequence after the append: that of its last event.
+    pub(crate) stream_version: u64,
     pub(crate) types: Vec<EventType>,
 }
 
@@ -28,24 +30,25 @@ impl Appended {
         Some(Self {
             key: Arc::from(key),
             head,
+            stream_version: outcome.stream_version,
             types: types.to_vec(),
         })
     }
 }
 
-/// The observer a system's journal carries: it tells each accepted append to
-/// the system's activator, once one is running.
+/// What a system's journal reports its appends to: it tells each accepted
+/// append to the system's activator, once one is running.
 ///
 /// It reads the very cell the system's node starts its activator in, and never
 /// starts one itself. Before the first projector is spawned there is no
 /// activator, and an append is reported to nobody — nothing could be woken by
 /// it.
-pub(crate) struct ActivatorObserver {
+pub(crate) struct ActivatorNotifier {
     activator: Arc<OnceCell<ProcessProxy<ProjectionActivator>>>,
 }
 
-impl ActivatorObserver {
-    /// An observer telling appends to the activator `activator` holds once it
+impl ActivatorNotifier {
+    /// A notifier telling appends to the activator `activator` holds once it
     /// is started.
     pub(crate) fn new(activator: Arc<OnceCell<ProcessProxy<ProjectionActivator>>>) -> Self {
         Self { activator }
@@ -53,7 +56,7 @@ impl ActivatorObserver {
 }
 
 #[async_trait]
-impl AppendObserver for ActivatorObserver {
+impl AppendObserver for ActivatorNotifier {
     async fn appended(&self, key: &str, outcome: &AppendOutcome, types: &[EventType]) {
         let Some(activator) = self.activator.get() else {
             return;
@@ -62,9 +65,9 @@ impl AppendObserver for ActivatorObserver {
             return;
         };
         let (stream, head) = (Arc::clone(&appended.key), appended.head);
-        // Every projector is the activator's child, so an activator that has
-        // stopped leaves no projector to wake. The append itself was accepted,
-        // so it is not failed for that.
+        // The activator runs as long as the process system does, so it refuses
+        // a notice only while that shuts down, its projectors with it. The
+        // append itself was accepted, so it is not failed for that.
         if let Err(error) = activator.tell(appended).await {
             tracing::debug!(
                 stream = %stream,
@@ -82,8 +85,8 @@ mod tests {
 
     use nitinol_persistence::{Family, TypeName};
 
-    const FIRST: EventType = EventType::new(Family::new("observer.test"), TypeName::new("First"));
-    const SECOND: EventType = EventType::new(Family::new("observer.test"), TypeName::new("Second"));
+    const FIRST: EventType = EventType::new(Family::new("notifier.test"), TypeName::new("First"));
+    const SECOND: EventType = EventType::new(Family::new("notifier.test"), TypeName::new("Second"));
 
     fn outcome(assigned_sequences: Vec<u64>) -> AppendOutcome {
         AppendOutcome {
@@ -93,7 +96,7 @@ mod tests {
     }
 
     #[test]
-    fn an_append_is_one_notice_naming_its_last_position_and_every_type() {
+    fn an_append_is_one_notice_naming_its_last_positions_and_every_type() {
         let appended = Appended::of(
             "stream",
             &outcome(vec![11, 12, 13]),
@@ -102,10 +105,15 @@ mod tests {
         .expect("an append of events must be told");
 
         assert_eq!(
-            (&*appended.key, appended.head, appended.types),
-            ("stream", 13, vec![FIRST, SECOND, FIRST]),
-            "the notice must name the stream, the append's last global position and the type \
-             of every event in it, in the order appended"
+            (
+                &*appended.key,
+                appended.head,
+                appended.stream_version,
+                appended.types
+            ),
+            ("stream", 13, 3, vec![FIRST, SECOND, FIRST]),
+            "the notice must name the stream, the append's last global position, the stream's \
+             version after it and the type of every event in it, in the order appended"
         );
     }
 
@@ -120,9 +128,9 @@ mod tests {
     #[tokio::test]
     async fn an_append_before_any_activator_returns_without_starting_one() {
         let activator = Arc::new(OnceCell::new());
-        let observer = ActivatorObserver::new(Arc::clone(&activator));
+        let notifier = ActivatorNotifier::new(Arc::clone(&activator));
 
-        observer
+        notifier
             .appended("stream", &outcome(vec![7]), &[FIRST])
             .await;
 

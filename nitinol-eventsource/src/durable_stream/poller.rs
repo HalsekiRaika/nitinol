@@ -1,3 +1,4 @@
+use std::convert::Infallible;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
@@ -10,12 +11,11 @@ use futures_util::future;
 use futures_util::{FutureExt, StreamExt};
 use nitinol_persistence::store::Journal;
 use nitinol_persistence::LoadedEvent;
-use nitinol_runtime::error::HandlerError;
+use nitinol_runtime::error::{AskError, HandlerError};
 use nitinol_runtime::process::{
-    Driver, Process, ProcessContext, ProcessProxy, Receive, Terminated,
+    Driver, Process, ProcessContext, ProcessProxy, ProcessWaker, Receive, Terminated,
 };
 use nitinol_runtime::Stream;
-use tokio::sync::Notify;
 
 use crate::durable_stream::batch::{PolledBatch, SettledThrough};
 use crate::durable_stream::cursor::SequenceCursor;
@@ -103,56 +103,20 @@ pub(crate) trait Poll: Process {
         Self: Sized;
 }
 
-/// A hint that what a poller reads has grown, so its next read need not wait
-/// out the interval.
+/// Have a batch poller read now rather than once its interval has passed.
 ///
-/// A nudge is a hint and nothing more: the poller still reads from its own
-/// cursor, so a nudge that arrives early, twice, or not at all changes when a
-/// record is read and never whether or how often it is delivered. Nudges given
-/// while the poller is reading are folded into one, which has it read once
-/// more as soon as that read is done. A `notified` future dropped by the
-/// lifecycle loop after it took the nudge hands it on to the next one, so the
-/// read is not lost to a system signal either.
-#[derive(Clone, Default)]
-pub(crate) struct Nudge(Arc<Notify>);
+/// A hint and nothing more: the poller still reads from its own cursor, so a
+/// `ReadNow` that arrives early, twice, or not at all changes when a record is
+/// read and never whether or how often it is delivered.
+pub(crate) struct ReadNow;
 
-impl Nudge {
-    /// Have the poller this was handed to read without waiting out its
-    /// interval.
-    pub(crate) fn nudge(&self) {
-        self.0.notify_one();
-    }
-
-    async fn notified(&self) {
-        self.0.notified().await;
-    }
-}
-
-/// What a batch poller tells the process that owns it about its reads.
+/// Told by a batch poller to its subscriber the first time a read of its finds
+/// nothing past the cursor at the end of the journal.
 ///
-/// The owner learns of a read from the poller itself rather than from the
-/// subscriber's answer, because the subscriber may have stopped before it was
-/// handed what the poller read.
-pub(crate) trait ReadReport: Send + Sync {
-    /// A read returned records, the last of them at global position `through`,
-    /// which the poller is about to hand to the subscriber. Called before the
-    /// hand-over, so the records are accounted for even if the subscriber is
-    /// gone by then.
-    fn handing_over(&self, through: u64);
-
-    /// A read ran to the end of the journal, came back short of the batch
-    /// limit, and what it returned has been dealt with: nothing, or a batch the
-    /// subscriber answered. Reported again by every such read.
-    fn caught_up(&self);
-}
-
-/// What the process that owns a batch poller and the poller tell each other:
-/// the owner nudges it, and it reports its reads.
-#[derive(Clone)]
-pub(crate) struct PollerLink {
-    pub(crate) nudge: Nudge,
-    pub(crate) reads: Arc<dyn ReadReport>,
-}
+/// Once per poller incarnation, not once per such read: every message a
+/// subscriber handles restarts its idle timer, so a subscriber told of each
+/// empty read would never stop idle.
+pub(crate) struct ReachedEnd;
 
 /// Ticks a poller once as soon as it starts, then once every `interval`.
 ///
@@ -167,20 +131,24 @@ pub(crate) struct PollerLink {
 /// looks for a system signal before it asks for the next tick, so a stop
 /// waits for at most the read in progress rather than for a whole backlog.
 ///
-/// A driver handed a [`Nudge`] also ends the wait as soon as it is nudged.
+/// The driver honours its process's waker: a wake ends the wait at once, so
+/// the poller reads without waiting out the interval. Wakes given while the
+/// poller is reading are kept and folded into one, which has it read once more
+/// as soon as that read is done.
 pub(crate) struct IntervalDriver<P> {
     interval: Duration,
-    nudge: Option<Nudge>,
+    /// Handed over by the lifecycle before the process starts.
+    waker: Option<ProcessWaker>,
     has_ticked: bool,
     read_at_once: bool,
     _phantom: PhantomData<fn() -> P>,
 }
 
 impl<P> IntervalDriver<P> {
-    pub(crate) fn new(interval: Duration, nudge: Option<Nudge>) -> Self {
+    pub(crate) fn new(interval: Duration) -> Self {
         Self {
             interval,
-            nudge,
+            waker: None,
             has_ticked: false,
             read_at_once: false,
             _phantom: PhantomData,
@@ -189,10 +157,10 @@ impl<P> IntervalDriver<P> {
 
     async fn wait_interval(&self) {
         let interval = tokio::time::sleep(self.interval);
-        match &self.nudge {
-            Some(nudge) => {
-                let nudged = nudge.notified();
-                future::select(std::pin::pin!(interval), std::pin::pin!(nudged)).await;
+        match &self.waker {
+            Some(waker) => {
+                let woken = waker.woken();
+                future::select(std::pin::pin!(interval), std::pin::pin!(woken)).await;
             }
             None => interval.await,
         }
@@ -237,6 +205,10 @@ where
 
     fn supports_idle_timeout(&self) -> bool {
         false
+    }
+
+    fn attach_waker(&mut self, waker: ProcessWaker) {
+        self.waker = Some(waker);
     }
 }
 
@@ -354,20 +326,25 @@ where
 /// moves to the position the subscriber answers it settled through — the
 /// whole batch, or the part of it before a record it could not settle — and
 /// stays put when it settled nothing.
+///
+/// The subscriber is told [`ReachedEnd`] the first time a read finds nothing
+/// past the cursor, and a [`ReadNow`] has the poller read at once.
 pub(crate) struct BatchPollerProcess<T, P> {
     pub(crate) store: Journal,
     pub(crate) subscriber: ProcessProxy<P>,
     pub(crate) transform: TransformFn<T>,
     pub(crate) cursor: SequenceCursor,
     pub(crate) batch_limit: NonZeroUsize,
-    /// Told of each read.
-    pub(crate) reads: Option<Arc<dyn ReadReport>>,
+    /// Whether this incarnation has told the subscriber [`ReachedEnd`].
+    pub(crate) reported_end: bool,
 }
 
 impl<T, P> Process for BatchPollerProcess<T, P>
 where
     T: 'static + Send + Sync,
-    P: Process + Receive<PolledBatch<T>, Response = SettledThrough>,
+    P: Process
+        + Receive<PolledBatch<T>, Response = SettledThrough>
+        + Receive<ReachedEnd, Response = ()>,
 {
     async fn on_start(&mut self, ctx: &mut ProcessContext<Self>) {
         watch_subscriber(ctx, &self.subscriber).await;
@@ -381,22 +358,62 @@ where
 impl<T, P> Poll for BatchPollerProcess<T, P>
 where
     T: 'static + Send + Sync,
-    P: Process + Receive<PolledBatch<T>, Response = SettledThrough>,
+    P: Process
+        + Receive<PolledBatch<T>, Response = SettledThrough>
+        + Receive<ReachedEnd, Response = ()>,
 {
     async fn poll_tick(
         &mut self,
         _ctx: &mut ProcessContext<Self>,
     ) -> Result<NextRead, HandlerError> {
-        Ok(poll_batch_once(
+        let read = poll_batch_once(
             &self.store,
             &self.subscriber,
             &self.transform,
             &mut self.cursor,
             self.batch_limit,
-            self.reads.as_deref(),
         )
-        .await)
+        .await;
+        if read.found_nothing && !self.reported_end {
+            self.reported_end = true;
+            if let Err(error) = self.subscriber.tell(ReachedEnd).await {
+                tracing::debug!(
+                    error = %error,
+                    "durable_stream: the subscriber has stopped; the end of the journal is not \
+                     reported to it"
+                );
+            }
+        }
+        Ok(read.next)
     }
+}
+
+impl<T, P> Receive<ReadNow> for BatchPollerProcess<T, P>
+where
+    T: 'static + Send + Sync,
+    P: Process
+        + Receive<PolledBatch<T>, Response = SettledThrough>
+        + Receive<ReachedEnd, Response = ()>,
+{
+    type Response = ();
+    type Error = Infallible;
+
+    async fn recv(
+        &mut self,
+        _msg: ReadNow,
+        ctx: &mut ProcessContext<Self>,
+    ) -> Result<(), Infallible> {
+        ctx.waker().wake();
+        Ok(())
+    }
+}
+
+/// What one read of a batch poller came to.
+struct BatchRead {
+    next: NextRead,
+    /// The read ran to the end of the journal and found nothing past the
+    /// cursor.
+    found_nothing: bool,
 }
 
 /// Read at most `batch_limit` records past the cursor, hand them to `proxy` as
@@ -406,36 +423,33 @@ where
 /// end and settled whole, asks for the next read at once: anything short of
 /// that has nothing more waiting, or something that needs the interval before
 /// it is tried again.
-///
-/// `reads` is told, before a batch is handed to `proxy`, how far the records in
-/// it reach, and afterwards, when a read ran to its end, came back short of
-/// `batch_limit`, and either returned nothing for `proxy` or had its batch
-/// answered by it, that the poller is caught up.
 async fn poll_batch_once<T, P>(
     store: &Journal,
     proxy: &ProcessProxy<P>,
     transform: &TransformFn<T>,
     cursor: &mut SequenceCursor,
     batch_limit: NonZeroUsize,
-    reads: Option<&dyn ReadReport>,
-) -> NextRead
+) -> BatchRead
 where
     T: 'static + Send + Sync,
     P: Process + Receive<PolledBatch<T>, Response = SettledThrough>,
 {
+    let after_interval = BatchRead {
+        next: NextRead::AfterInterval,
+        found_nothing: false,
+    };
     let query = cursor.to_load_query().with_limit(batch_limit.get());
     let stream = match store.load(query).await {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(error = ?e, "durable_stream: subscriber batch poll load failed");
-            return NextRead::AfterInterval;
+            return after_interval;
         }
     };
 
     let mut records = Vec::new();
     let mut read = 0usize;
     let mut last_observed = None;
-    let mut highest_global = 0;
     let mut read_to_end = true;
     futures_util::pin_mut!(stream);
     while let Some(item) = stream.next().await {
@@ -453,31 +467,21 @@ where
         read += 1;
         let observed = cursor.observed(&loaded);
         last_observed = Some(observed);
-        let global = loaded.global_sequence;
         if let Some(value) = transform(loaded) {
-            highest_global = highest_global.max(global);
             records.push((observed, value));
         }
     }
 
-    let reached_end = read_to_end && read < batch_limit.get();
-
     let Some(last_observed) = last_observed else {
-        if let (true, Some(reads)) = (reached_end, reads) {
-            reads.caught_up();
-        }
-        return NextRead::AfterInterval;
+        return BatchRead {
+            next: NextRead::AfterInterval,
+            found_nothing: read_to_end,
+        };
     };
 
     let settled_through = if records.is_empty() {
         Some(last_observed)
     } else {
-        // Before the hand-over, not after: the subscriber may have stopped by
-        // the time it is asked, and what was read is then owed to nobody unless
-        // the owner has been told of it already.
-        if let Some(reads) = reads {
-            reads.handing_over(highest_global);
-        }
         match proxy
             .ask(PolledBatch {
                 records,
@@ -486,6 +490,17 @@ where
             .await
         {
             Ok(SettledThrough(through)) => Some(through),
+            // A subscriber that stops — on its idle timeout, say — while a batch
+            // waits in its mailbox drops it unanswered, and stops this poller
+            // next; that is no failure of the batch.
+            Err(e @ (AskError::ReplyDropped | AskError::DeadLetter { .. })) => {
+                tracing::debug!(
+                    error = %e,
+                    "durable_stream: the subscriber stopped before answering the batch; \
+                     cursor not advanced"
+                );
+                None
+            }
             Err(e) => {
                 tracing::warn!(
                     error = %e,
@@ -498,19 +513,16 @@ where
     };
     if let Some(through) = settled_through {
         cursor.advance(through);
-        // Not before the records were handed over and answered: a read that
-        // reached the end but whose batch the subscriber never took is not a
-        // finished catch-up.
-        if let (true, Some(reads)) = (reached_end, reads) {
-            reads.caught_up();
-        }
     }
     let settled_whole = settled_through == Some(last_observed);
 
     if read_to_end && settled_whole && read >= batch_limit.get() {
-        NextRead::AtOnce
+        BatchRead {
+            next: NextRead::AtOnce,
+            found_nothing: false,
+        }
     } else {
-        NextRead::AfterInterval
+        after_interval
     }
 }
 
@@ -620,19 +632,51 @@ where
 mod tests {
     use super::*;
 
-    use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
 
     use bytes::Bytes;
     use nitinol_persistence::store::InMemoryEventStore;
     use nitinol_persistence::{AppendingEvent, EventType, Family, TypeName};
     use nitinol_runtime::{ProcessSystem, Props};
 
-    /// A batch subscriber that takes every batch whole, or refuses every one.
+    use crate::durable_stream::DurableSubscription;
+
+    /// A batch subscriber that takes every batch whole, or refuses every one,
+    /// and counts the times it was told the end of the journal was reached.
+    ///
+    /// Started with a `journal`, it reads it through a batch poller of its own,
+    /// as a projector does.
     struct Subscriber {
         takes: bool,
+        ends: Arc<AtomicUsize>,
+        reads: Option<(Journal, Duration)>,
     }
 
-    impl Process for Subscriber {}
+    impl Subscriber {
+        fn taking(takes: bool) -> Self {
+            Self {
+                takes,
+                ends: Arc::default(),
+                reads: None,
+            }
+        }
+    }
+
+    impl Process for Subscriber {
+        async fn on_start(&mut self, ctx: &mut ProcessContext<Self>) {
+            if let Some((journal, interval)) = self.reads.clone() {
+                DurableSubscription::new(|_loaded| Some(0u8))
+                    .with_poll_interval(interval)
+                    .spawn_batch_child(
+                        ctx,
+                        journal,
+                        SequenceCursor::Global { after: 0 },
+                        NonZeroUsize::new(10).expect("10 is not zero"),
+                    )
+                    .await;
+            }
+        }
+    }
 
     impl Receive<PolledBatch<u8>> for Subscriber {
         type Response = SettledThrough;
@@ -651,33 +695,17 @@ mod tests {
         }
     }
 
-    /// What a poller reported of its reads, in order.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum Reported {
-        HandingOver(u64),
-        CaughtUp,
-    }
+    impl Receive<ReachedEnd> for Subscriber {
+        type Response = ();
+        type Error = Infallible;
 
-    #[derive(Default)]
-    struct Reports(Mutex<Vec<Reported>>);
-
-    impl Reports {
-        fn all(&self) -> Vec<Reported> {
-            self.0.lock().expect("no report panics").clone()
-        }
-
-        fn push(&self, reported: Reported) {
-            self.0.lock().expect("no report panics").push(reported);
-        }
-    }
-
-    impl ReadReport for Reports {
-        fn handing_over(&self, through: u64) {
-            self.push(Reported::HandingOver(through));
-        }
-
-        fn caught_up(&self) {
-            self.push(Reported::CaughtUp);
+        async fn recv(
+            &mut self,
+            _msg: ReachedEnd,
+            _ctx: &mut ProcessContext<Self>,
+        ) -> Result<(), Infallible> {
+            self.ends.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         }
     }
 
@@ -686,7 +714,7 @@ mod tests {
         for sequence in 1..=events {
             journal
                 .append(
-                    "poller-reports",
+                    "poller-reads",
                     vec![AppendingEvent {
                         sequence,
                         event_type: EventType::new(
@@ -705,66 +733,84 @@ mod tests {
 
     /// Poll once, with a batch limit of 10, over a journal of `events` events,
     /// handing them to a subscriber that `takes` the batch or refuses it, and
-    /// answer the cursor and what the poller reported.
-    async fn poll_once_over(events: u64, takes: bool) -> (SequenceCursor, Vec<Reported>) {
+    /// answer the cursor and what the read came to.
+    async fn poll_once_over(events: u64, takes: bool) -> (SequenceCursor, BatchRead) {
         let journal = journal_of(events).await;
         let subscriber = ProcessSystem::new()
             .await
-            .spawn(Props::new(move || Subscriber { takes }))
+            .spawn(Props::new(move || Subscriber::taking(takes)))
             .await;
         let transform: TransformFn<u8> = Arc::new(|_loaded| Some(0));
         let mut cursor = SequenceCursor::Global { after: 0 };
-        let reports = Reports::default();
-        poll_batch_once(
+        let read = poll_batch_once(
             &journal,
             &subscriber,
             &transform,
             &mut cursor,
             NonZeroUsize::new(10).expect("10 is not zero"),
-            Some(&reports),
         )
         .await;
-        (cursor, reports.all())
+        (cursor, read)
     }
 
-    /// A read that ran to the end of the journal says nothing of what its
-    /// batch became until the subscriber has answered: a subscriber that has
-    /// stopped, or refuses the batch, leaves records unprojected. They are
-    /// reported as owed, though, before the subscriber is asked.
     #[tokio::test]
-    async fn a_batch_the_subscriber_refuses_is_reported_as_owed_and_not_as_caught_up() {
-        let (cursor, reported) = poll_once_over(2, false).await;
+    async fn a_batch_the_subscriber_refuses_leaves_the_cursor_behind_it() {
+        let (cursor, read) = poll_once_over(2, false).await;
 
-        assert_eq!(
-            reported,
-            [Reported::HandingOver(2)],
-            "the records must be reported through the last one, and not as read to the end"
-        );
         assert!(
             matches!(cursor, SequenceCursor::Global { after: 0 }),
             "the cursor must stay behind the batch the subscriber refused"
         );
+        assert!(
+            !read.found_nothing,
+            "a read that returned records did not find nothing"
+        );
     }
 
     #[tokio::test]
-    async fn a_batch_the_subscriber_takes_is_reported_as_owed_and_then_as_caught_up() {
-        let (cursor, reported) = poll_once_over(2, true).await;
+    async fn a_batch_the_subscriber_takes_moves_the_cursor_to_what_it_settled() {
+        let (cursor, read) = poll_once_over(2, true).await;
 
-        assert_eq!(
-            reported,
-            [Reported::HandingOver(2), Reported::CaughtUp],
-            "the records must be reported before the answer, and the end after it"
-        );
         assert!(
             matches!(cursor, SequenceCursor::Global { after: 2 }),
             "the cursor must move to what the subscriber settled"
         );
+        assert!(
+            !read.found_nothing,
+            "a read that returned records did not find nothing"
+        );
     }
 
     #[tokio::test]
-    async fn a_read_of_nothing_is_reported_as_caught_up_without_any_record() {
-        let (_cursor, reported) = poll_once_over(0, true).await;
+    async fn a_read_past_the_end_of_the_journal_finds_nothing() {
+        let (_cursor, read) = poll_once_over(0, true).await;
 
-        assert_eq!(reported, [Reported::CaughtUp]);
+        assert!(read.found_nothing);
+    }
+
+    /// Every read of an empty journal finds nothing, and the subscriber is
+    /// told so once: each telling would restart its idle timer.
+    #[tokio::test(start_paused = true)]
+    async fn the_end_of_the_journal_is_reported_to_the_subscriber_once_per_poller() {
+        let interval = Duration::from_millis(10);
+        let ends = Arc::new(AtomicUsize::new(0));
+        let journal = journal_of(0).await;
+        let subscriber_ends = Arc::clone(&ends);
+        ProcessSystem::new()
+            .await
+            .spawn(Props::new(move || Subscriber {
+                takes: true,
+                ends: Arc::clone(&subscriber_ends),
+                reads: Some((journal.clone(), interval)),
+            }))
+            .await;
+
+        tokio::time::sleep(interval * 10).await;
+
+        assert_eq!(
+            ends.load(Ordering::SeqCst),
+            1,
+            "ten reads of an empty journal must tell the subscriber of the end once"
+        );
     }
 }
